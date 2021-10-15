@@ -3,6 +3,18 @@ uuid = "5afc15dd-4d1f-4fa3-9729-bbaafe85d607"
 authors = ["David Leather <leather@chapman.edu> and contributors"]
 version = "0.1.0"
 
+[deps]
+Infiltrator = "5903a43b-9cc3-4c30-8d17-598619ec4e9b"
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Parameters = "d96e819e-fc66-5662-9728-84c9c7592b0a"
+QuantEcon = "fcd29c91-0bd7-5a09-975d-7ac3f643a60c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
+
 [compat]
 julia = "1.6"
 
