@@ -828,7 +828,7 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
      end
 
      #println(tmr)
-     return Q_mc, η_mc, Q_std_mc 
+     return Q_mc, η_mc, Q_std_mc, T_bar 
 
 end
 
