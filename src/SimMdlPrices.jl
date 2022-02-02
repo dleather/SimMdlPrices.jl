@@ -10,6 +10,10 @@ using Infiltrator
 using StatsFuns
 using InteractiveUtils
 using TimerOutputs
+using RecursiveArrayTools
+using QuadGK
+using Distributions
+using Mmap
 
 function simulate_ms_var_1_cond_shocks(x0,s0,μ,Φ,Σ,Π,u,ϵ)
      
@@ -178,7 +182,8 @@ function transform_struct_to_rf(b0₁, b0₂, bm1₁, bm1₂, b1₁, b1₂, m0�
      return μ, Φ, μ_Q, Φ_Q, Σ, cov, Π, q, det_dum    
 end
 
-function get_forward_solution_msre(π_m, A1₁, A1₂, F1₁, F1₂, m1₁, m1₂, Σ1_11, Σ1_12, Σ1_21, Σ1_22, maxₖ)
+function get_forward_solution_msre(π_m, A1₁, A1₂, F1₁, F1₂, m1₁, m1₂, Σ1_11, Σ1_12, Σ1_21, 
+               Σ1_22, maxₖ)
 
      Φ, k_term = get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂, maxₖ = maxₖ)
 
@@ -212,7 +217,8 @@ function get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂; maxₖ = 1000, tolK = 0.000
                     Ωk₂ = (I - A1₂ * (π_m[2,1] .* Ωkm1[1] + π_m[2,2] .* Ωkm1[2] ) ) \ B₂
 
                     #Check for convergence
-                    dist = max( maximum(abs.( Ωk₁ - Ωkm1[1] )), maximum(abs.( Ωk₂ - Ωkm1[2] )))
+                    dist = max( maximum(abs.( Ωk₁ - Ωkm1[1] )), 
+                         maximum(abs.( Ωk₂ - Ωkm1[2] )) )
 
                     
                     #update values or break
@@ -336,6 +342,7 @@ end
      σ_z::SMatrix{3, 1, Float64, 3}
      σ_q::SMatrix{3, 1, Float64, 3}
      σ_ν::SMatrix{3, 1, Float64, 3}
+     σ_y::Float64
      det_dum::Int64
 
 end
@@ -371,9 +378,9 @@ function params_to_rf(params)
 
      msp = construct_structural_parameters(params)
 
-     @unpack Π_0, Π_X, m_g, m_r₁, m_r₂, ϕ, δ, μ_g, μ_pi, ρ₁, ρ₂, β₁, β₂, α₁, α₂, σ_g, σ_pi, σ_r₁, σ_r₂, σ_y, γ_gₐ, 
-     γ_piₐ, γ_cₐ, γ_gᵢ, γ_piᵢ, γ_cᵢ, γ_gₒ, γ_piₒ, γ_cₒ, ρₐ, ρᵢ, ρₒ, σ_wₐ, σ_zₐ, σ_νₐ, σ_qₐ, σ_wᵢ, σ_zᵢ, σ_νᵢ, σ_qᵢ, σ_wₒ, σ_zₒ,
-     σ_νₒ, σ_qₒ, λ, π_m, π_d = msp
+     @unpack Π_0, Π_X, m_g, m_r₁, m_r₂, ϕ, δ, μ_g, μ_pi, ρ₁, ρ₂, β₁, β₂, α₁, α₂, σ_g, σ_pi, 
+     σ_r₁, σ_r₂, σ_y, γ_gₐ, γ_piₐ, γ_cₐ, γ_gᵢ, γ_piᵢ, γ_cᵢ, γ_gₒ, γ_piₒ, γ_cₒ, ρₐ, ρᵢ, ρₒ, σ_wₐ, 
+     σ_zₐ, σ_νₐ, σ_qₐ, σ_wᵢ, σ_zᵢ, σ_νᵢ, σ_qᵢ, σ_wₒ, σ_zₒ, σ_νₒ, σ_qₒ, λ, π_m, π_d = msp
 
      b0₁,b0₂,bm1₁,bm1₂,b1₁,b1₂,m0₁,m0₂,Γ₁,Γ₂ = 
           construct_structural_matrices_macro(ϕ, δ, ρ₁, ρ₂, β₁, β₂, α₁, α₂, μ_g, μ_pi, m_g, m_r₁, m_r₂, σ_g, σ_pi, σ_r₁, 
@@ -384,12 +391,12 @@ function params_to_rf(params)
      
      μ_ν , Φ_ν, μ_Q_ν, Φ_Q_ν, Σ_ν, cov_ν, Δ, Δ_Q, σ_w, σ_z, σ_q, σ_ν = 
           augment_macro_fsmsre_nu(μ, Φ, μ_Q, Φ_Q, Σ, γ_gₐ, γ_gᵢ, γ_gₒ, γ_piₐ, γ_piᵢ, γ_piₒ, γ_cₐ, γ_cᵢ, γ_cₒ, ρₐ, ρᵢ, ρₒ, 
-                                                        λ, σ_wₐ, σ_wᵢ, σ_wₒ, σ_zₐ, σ_zᵢ, σ_zₒ,σ_qₐ, σ_qᵢ, σ_qₒ, σ_νₐ, σ_νᵢ, σ_νₒ)
+                          λ, σ_wₐ, σ_wᵢ, σ_wₒ, σ_zₐ, σ_zᵢ, σ_zₒ,σ_qₐ, σ_qᵢ, σ_qₒ, σ_νₐ, σ_νᵢ, σ_νₒ)
      
      mrfp = ModelReducedFormParams(μ = μ, μ_ν = μ_ν, μ_Q = μ_Q, μ_Q_ν = μ_Q_ν, Φ = Φ, Φ_ν = Φ_ν, 
-                                                               Φ_Q = Φ_Q, Φ_Q_ν = Φ_Q_ν, Σ = Σ, Σ_ν = Σ_ν, cov = cov, 
-                                                               cov_ν = cov_ν, Π = Π, q = q, det_dum = det_dum, Δ = Δ, Δ_Q = Δ_Q,
-                                                               σ_w = σ_w, σ_z = σ_z, σ_q = σ_q, σ_ν = σ_ν)
+          Φ_Q = Φ_Q, Φ_Q_ν = Φ_Q_ν, Σ = Σ, Σ_ν = Σ_ν, cov = cov, cov_ν = cov_ν, Π = Π, 
+          q = q, det_dum = det_dum, Δ = Δ, Δ_Q = Δ_Q, σ_w = σ_w, σ_z = σ_z, σ_q = σ_q, 
+          σ_ν = σ_ν, σ_y = σ_y)
 
      return mrfp
 end
@@ -804,8 +811,8 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
           
           #Compute total mean and variance
 
-          Q_mc_tot, η_mc_tot, Q_std_mc_tot = get_total_mean_and_std(Q_mc_cell[1:l], η_mc_cell[1:l], 
-                                                                                                                 Q_std_prep_cell[1:l])
+          Q_mc_tot, η_mc_tot, Q_std_mc_tot =
+               get_total_mean_and_std(Q_mc_cell[1:l],η_mc_cell[1:l],Q_std_prep_cell[1:l])
     
           #Check condition
           if (!any((2 .* (1. .- normcdf.((1.2 .* tol .* Q_mc_tot) ./ Q_std_mc_tot)) .> del)) || (l==L) )
@@ -832,7 +839,618 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
 
 end
 
+@with_kw struct MonteCarloStruct
 
+     T::Int64
+     S::Int64
+     N_re::Int64
+     N_params::Int64
+     Q_A_mat::Matrix{Float64}
+     Q_I_mat::Matrix{Float64}
+     Q_O_mat::Matrix{Float64}
+     Q_A_std_mat::Matrix{Float64}
+     Q_I_std_mat::Matrix{Float64}
+     Q_O_std_mat::Matrix{Float64}
+     cap_data::Matrix{Float64}
+     ν_data::Matrix{Float64}
+     Y_data::Matrix{Float64}
+     Macro_data::Matrix{Float64}
+
+end
+
+function construct_mc_struct(T, S, N_re, Q_A_mat, Q_I_mat, Q_O_mat, Q_A_std_mat, Q_I_std_mat, 
+     Q_O_std_mat, cap_data, ν_data, Y_data, Macro_data)
+
+     mcs = MonteCarloStruct(T = T, S = S, N_re = N_re, Q_A_mat = Q_A_mat, Q_I_mat = Q_I_mat, 
+          Q_O_mat = Q_O_mat, Q_A_std_mat = Q_A_std_mat, Q_I_std_mat = Q_I_std_mat, 
+          Q_O_std_mat = Q_O_std_mat, cap_data = cap_data, ν_data = ν_data, Y_data = Y_data, 
+          Macro_data = Macro_data)
+
+     return mcs
+
+end
+
+function mc_loglik_numint_1d(θ, yield_mat, macro_mat, cap_mat, ν_mat, scale_vec, 
+     filter_dum, Q_mc_mat, σ_mc_mat)
+
+     # θ to reduced-form model solution
+     rf_struct = params_to_rf(θ ./ scale_vec)
+
+     # Process data 
+     data_struct = process_data(yield_mat, macro_mat, cap_mat, ν_mat)
+
+     # Check for feasibility 
+     feas_dum = is_feasible(rf_struct)
+     if feas_dum==0
+          neg_log_posterior = Inf
+          fp = NaN
+          sp = NaN
+          log_lik = Inf
+          log_prior = Inf
+     end
+     sp = NaN
+
+     # rf_model to model predictions 
+     pred_struct = make_model_predictions(data_struct, rf_struct, Q_mc_mat, σ_mc_mat)
+
+     # rf_model, model_predictions, data --> log-likihood (todo)
+     neg_log_lik, fp, ξ̂_tt, ξ̂_ttm1 = compute_model_neg_log_lik(pred_struct, data_struct, 
+          rf_struct)
+     
+     log_prior = log_prior_fn(θ)
+
+     neg_log_posterior = -log_prior + neg_log_lik
+
+     return neg_log_posterior, fp, sp, log_lik, log_prior
+
+end
+
+function is_feasible(rf_struct)
+
+     feas_dum = 1
+     @unpack Φ, det_dum = rf_struct
+     Φ₁ = Φ[1]
+     Φ₂ = Φ[3]
+
+     if det_dum == 0
+          feas_dum = 0
+     else
+          if !((any(Φ₁.==NaN))&&(any(Φ₂.==NaN)))
+               feas_dum = 0
+          end
+     end
+
+     return feas_dum
+end
+
+@with_kw struct DataStruct
+     
+     Y_macro::Matrix{Float64}
+     Y0_macro::Matrix{Float64}
+     Y1_macro::Matrix{Float64}
+     Y_ts::Matrix{Float64}
+     Y0_ts::Matrix{Float64}
+     Y1_ts::Matrix{Float64}
+     Y_cap::Matrix{Float64}
+     Y0_cap::Matrix{Float64}
+     Y1_cap::Matrix{Float64}
+     Y_ν::Matrix{Float64}
+     Y0_ν::Matrix{Float64}
+     Y1_ν::Matrix{Float64}
+     Y_q::Matrix{Float64}
+     Y0_q::Matrix{Float64}
+     Y1_q::Matrix{Float64}
+     n_re::Int64
+     n_yields::Int64
+     n_macro::Int64
+     n_ts::Int64
+     T::Int64
+end
+
+
+function process_data(yield_data,macro_data,cap_data,ν_data)
+
+     num_re = 3
+
+     # Get matrix dimensions
+     T, n_Y = size(yield_data)
+     n_M = size(macro_data)[2]
+     #n_re = size(cap_data)[2]
+
+     #Make level and quarterly
+     yield_data = yield_data ./ 400
+     macro_data = macro_data ./ 400
+     cap_data = cap_data ./ 400
+
+     #Unload data
+     Y_macro = [macro_data yield_data[:,1]]
+     Y_ts = yield_data[:,2:n_Y]
+     Y_ν = ν_data[:,1:num_re]
+     Y_q = 1 ./ Y_cap
+
+     #Create lag matrix (TODO)
+     Y0_macro,Y1_macro = create_lag_matrix(Y_macro)
+     Y0_ts,Y1_ts = create_lag_matrix(Y_ts)
+     Y0_cap,Y1_cap = create_lag_matrix(Y_cap)
+     Y0_ν,Y1_ν = create_lag_matrix(Y_ν)
+     Y0_q,Y1_q = create_lag_matrix(Y_q)
+
+     data_struct = DataStruct(Y_macro = Y_macro, Y0_macro = Y0_macro, Y1_macro = Y1_macro,
+          Y_ts = Y_ts, Y0_ts = Y0_ts, Y1_ts = Y1_ts, Y_cap = Y_cap, Y0_cap = Y0_cap,
+          Y1_cap = Y1_cap, Y_ν = Y_ν, Y0_ν = Y0_ν, Y1_ν = Y1_ν, Y_q = Y_q, Y0_q = Y0_q,
+          Y1_q = Y1_q, n_re = num_re, n_yields = n_Y - 1, n_macro = n_M + 1, n_ts = T, 
+          T = T - 1)
+
+     return data_struct
+end
+
+function create_lag_matrix(Y)
+
+     Y0 = Y[2:end,:]
+     Y1 = Y[1:end-1,:]
+
+     return Y0, Y1
+end
+
+@with_kw struct ModelPredictionStruct
+
+     Y0_hat_macro::Matrix{Float64}
+     Y0_hat_ν::Matrix{Float64}
+     Y0_hat_ts::Matrix{Float64}
+     Y0_hat_q::Matrix{Float64}
+     Y0_hat_q_std::Matrix{Float64}
+
+end
+
+function make_model_predictions(data_struct, rf_struct, Q_mc_mat, std_mc_mat)
+
+     #unload structures
+     @unpack Y1_macro, Y0_macro, Y0_ν, n_yields, T = data_struct
+     @unpack S = rf_struct
+
+     #Given Y1_macro, predict Y0_macro 
+     Y0_hat_macro = project_macro_model(Y1_macro, rf_struct)
+
+     #Given Y0_macro predict NOI growth 
+     Y0_hat_ν = project_ν_cond_macro(Y1_macro, rf_struct)
+
+     #Given Y0_macro predict term-structure using quadratic approx 
+     Y0_macro_ν = [Y0_macro Y0_ν]
+     Y_hat_ts = approximate_model_prices(Y0_macro_ν', rf_struct)
+
+     Y0_hat_ts = Array{Float64}(undef, T, n_yields * S)
+     for s ∈ 1:S
+          Y0_hat_ts[:,1+(s-1)*n_yields:s*n_yields] = Y_hat_ts[:,:,s]'
+     end
+
+     Y0_hat_q = Q_mc_mat[2:end,:]
+     Y0_hat_q_std = std_mc_mat[2:end,:]
+
+     pred_struct = ModelPredictionStruct(Y0_hat_macro = Y0_hat_macro, Y0_hat_ν = Y0_hat_ν,
+          Y0_hat_ts = Y0_hat_ts, Y0_hat_q = Y0_hat_q, Y0_hat_q_std = Y0_hat_q_std)
+
+     return pred_struct
+end
+
+function project_macro_model(Y, rf_struct)
+
+     @unpack S, μ, Φ = rf_struct
+     Y_hat = project_msvar(Y, μ, Φ, S)
+
+     return Y_hat
+end
+
+function project_msvar(Y, μ, Φ, S)
+
+     T,N = size(Y)
+
+     B = Array{Float64}(undef, S*N, N+1)
+     for s ∈ 1:S
+          B[1+(s-1)*N:s*N,:] = [μ[s] Φ[s]]
+     end
+
+     Y_bar = [ones(1,T); Y']
+
+     Ŷ = (B*Y_bar)'
+
+     return Ŷ
+end
+
+function project_ν_cond_macro(data_struct, rf_struct)
+
+     #unpack structures
+     @unpack Y0_macro, Y1_ν = data_struct
+     @unpack Δ = rf_struct
+
+     #Δ = @SMatrix [γ_gₐ γ_piₐ 0. ρₐ 0. 0. γ_cₐ;
+     #                  γ_gᵢ γ_piᵢ 0. 0. ρᵢ 0. γ_cᵢ;
+     #                  γ_gₒ γ_piₒ 0. 0. 0. ρₒ γ_cₒ];
+
+     C = Δ[:,end]
+     B_macro = Δ[:,1:3]
+     B_ν = Δ[:,4:6]
+
+     Y0_hat_ν = (C + B_macro*(Y0_macro') + B_ν*(Y1_ν'))
+
+     return Y0_hat_ν   
+     
+end
+
+function approximate_model_prices(x_mat, rf_struct)
+#    Currently only approximates term structure     
+#    TODO: Approximate Q using quadratic approximation
+
+
+
+     #Get term structure factor loadings
+     maturity_mat = [8 20 40]
+
+     ts_factor_loading_struct = 
+          get_term_structure_quadratic_pricing_factors(maturity_mat, rf_struct)
+
+     ts_mat, m1_ts_mat, m2_ts_mat = approximate_term_structure_cond_x(x_mat[1:3,:], 
+          ts_factor_loading_struct, maturity_mat)
+
+     return ts_mat
+
+end
+
+function get_term_structure_quadratic_pricing_factors(maturity_mat, rf_struct)
+
+     @unpack Π, μ_Q, Φ_Q, cov = rf_struct
+     δ = @SMatrix [0. 0. -1.]
+
+     A_cell, B_cell, C_cell, D_cell, F_cell = compute_quadratic_pricing_factors_msvar(δ,
+          maturity_mat', Π, μ_Q, Φ_Q, cov)
+
+     ts_factor_loading_struct = TermStructureFactorLoadingStruct(A_ts = A_cell,
+          B_ts = B_cell, C_ts = C_cell, D_ts = D_cell, F_ts = F_cell)
+
+     return ts_factor_loading_struct
+
+end
+
+@with_kw struct TermStructureFactorLoadingStruct
+
+     A_ts::Matrix{Float64}
+     B_ts::Array{SMatrix{3,1,Float64,3}}
+     C_ts::Array{Float64}
+     D_ts::Array{SMatrix{3, 1, Float64, 3}}
+     F_ts::Array{SMatrix{3, 3, Float64, 9}}
+
+end
+
+function compute_quadratic_pricing_factors_msvar(δ, cf_mat, Π, μ_Q, Φ_Q, cov)
+     
+     #Unload inputs and preallocate
+     N = size(μ_Q[1])[1]
+     n_cf = size(cf_mat)[1]
+     max_n = maximum(cf_mat)
+     S = size(Π)[1]
+
+     A_cell = Array{Float64}(undef, S, n_cf)
+     B_cell = Array{SMatrix{N, 1, Float64, N}}(undef, S, n_cf)
+     C_cell = Array{Float64}(undef, S, n_cf)
+     D_cell = Array{SMatrix{N, 1, Float64, 3}}(undef, S, n_cf)
+     F_cell = Array{SMatrix{N, N, Float64, N*N}}(undef, S, n_cf)
+     
+     tmp_A = zeros(S,1)
+     tmp_B = zeros(N,S)
+     tmp_C = zeros(S,1)
+     tmp_D = zeros(N,S)
+     tmp_F = zeros(N,N,S)
+
+     δ = δ'
+     i_cf = 1
+     for cf ∈ 1:max_n
+          if cf > 1
+               A_term_mat = @SMatrix zeros(undef, S, S)
+               B_term_mat = Array{Float64}(undef, N, S, S)
+               C_term_mat = Array{Float64}(undef, S, S)
+               D_term_mat = Array{Float64}(undef, N, S, S)
+               F_term_mat = Array{Float64}(undef, N, N, S, S)
+
+               for j ∈ 1:S #s_{t+1}
+                    μⱼ = μ_Q[j]
+                    Φⱼ = Φ_Q[j]
+                    A_term = tmp_A[jj] + μⱼ'*tmp_B[:,j]
+                    B_term = Φⱼ'*tmp_B[:,j]
+                    C_term = tmp_C[j] + μⱼ'*tmp_D[:,j] + μⱼ'*tmp_F[:,:,j]*μⱼ + 
+                         tr(tmp_f[:,:,j]*cov[j])
+                    D_term = Φⱼ' * (tmp_D[:,j] + 2. .* tmp_F[:,:,j]' * μⱼ)
+                    F_term = Φⱼ' * tmp_F[:,:,j] * Φⱼ
+
+                    for i ∈ 1:S #s_t
+                         A_term_mat[i,j] = Π[i,j] .* A_term
+                         B_term_mat[:,i,j] =  Π[i,j] .* B_term
+                         C_term_mat[i,j] = Π[i,j] .* C_term
+                         D_term_mat[:,i,j] =  Π[i,j] .* D_term
+                         F_term_mat[:,:,i,j] = Π[i,j] .* F_term
+
+                    end
+               end
+
+               A_term_i = sum(A_term_mat,dims = 2)
+               B_term_i = dropdims(sum(B_term_mat, dims = 3), dims = 3)
+               C_term_i = sum(C_term_mat, dims = 2)
+               D_term_i = dropdims(sum(D_term_mat, dims = 3), dims = 3)
+               F_term_i = dropdims( sum(F_term_mat, dims = 4), dims = 4)
+
+               for i=1:S
+                    A_cell[i,i_cf] = A_term_i[i]
+                    B_cell[i,i_cf] = δ + B_term_i[:,i]
+                    C_cell[i,i_cf] = C_term_i[i]
+                    D_cell[i,i_cf] = 2. .* A_term_i[i] * δ +  D_term_i[:,i]
+                    F_cell[i,i_cf] = -δ*δ' + δ*B_cell[i,i_cf]' + B_cell[i,i_cf]*δ' + 
+                                     F_term_i[:,:,i]
+               end
+
+          else
+
+               for i ∈ 1:S
+                    A_cell[i,i_cf] = 0
+                    B_cell[i,i_cf] = δ
+                    C_cell[i,i_cf] = 0
+                    D_cell[i,i_cf] = @SMatrix zeros(N,1)
+                    F_cell[i,i_cf] = δ*δ'
+               end
+
+          end
+
+          for i ∈ 1:S
+               tmp_A[i] = A_cell[i,i_cf]
+               tmp_B[:,i] = B_cell[i,i_cf]
+               tmp_C[i] = C_cell[i,i_cf]
+               tmp_D[:,i] = D_cell[i,i_cf]
+               tmp_F[:,:,i] = F_cell[i,i_cf]
+          end
+
+          if cf_mat[i_cf] == cf
+               i_cf += 1
+          end
+
+     end
+
+
+     return A_cell, B_cell, C_cell, D_cell, F_cell
+
+end
+
+function approximate_term_structure_cond_x(x_mat,ts_factor_struct,maturity_mat)
+
+     T = size(x_mat)[2]
+     @unpack A_ts, B_ts, C_ts, D_ts, F_ts = ts_factor_struct
+     S = size(A_ts)[1]
+
+     m1_mat = compute_m1_cond_x(x_mat, A_ts, B_ts)
+     m2_mat = compute_m2_cond_x(x_mat, C_ts, D_ts, F_ts)
+
+     ts_mat = -(m1_mat + 0.5 .* (m2_mat - m1_mat.^2)) ./ repeat(maturity_mat',1,T,S)
+
+     return ts_mat, m1_mat, m2_mat 
+end
+
+function compute_m1_cond_x(x_mat, A, B)
+
+     N,T = size(x_mat)
+     S,N_terms = size(A)
+
+     m1_mat = Array{Float64}(undef, N_terms, T, S)
+
+     y_mat = [ones(T,1) x_mat']
+
+     bar_y_1 = reshape(A', 1, N_terms*S)
+     bar_y_2 = dropdims(convert(Array,VectorOfArray(vec(reshape(permutedims(B),1, N_terms*S)
+          ))), dims = 2)
+     bar_y = [bar_y_1; bar_y_2]
+
+     m1_tmp_mat = y_mat * bar_y
+
+     for s ∈ 1:S
+        m1_mat[:,:,s] = m1_tmp_mat[:,1+(s-1)*N_terms:N_terms*s]'
+     end
+
+     return m1_mat
+
+end
+
+function compute_m2_cond_x(x_mat, C, D, F)
+
+     N,T = size(x_mat)
+     S,N_terms = size(C[1])
+     m2_mat = Array{Float64}(undef, N_terms, T, S)
+
+     #Define y_mat matrix: [1, x_t', vec(x_t * x_t')']_t (T x (1 + N + N^2))
+     y_mat = Array{Float64}(undef, T, 1 + N + N^2)
+     y_mat[:,1] .= 1.
+     y_mat[:,2:N+1] = x_mat'
+
+     for t ∈ 1:T
+          y_mat[t,N+2:end] = vec(x_mat[:,t]*x_mat[:,t]')'
+     end
+
+     #Define y_bar matrix: ( (1 + N + N^2) x (N_terms*S) )
+     bar_y = Array{Float64}(undef, 1 + N + N^2, N_terms*S)
+     bar_y[1,:] = reshape(C', 1, N_terms*S)
+     bar_y[2:N+1,:] = dropdims(convert(Array,VectorOfArray(vec(reshape(permutedims(D),1,
+          N_terms*S)))), dims = 2)
+     bar_y = [bar_y_1; bar_y_2]
+     
+     cnt = 1
+     for s ∈ 1:S
+          for n ∈ 1:N_terms
+               bar_y[N+2:end,cnt] = vec(F[s,n]')
+               cnt += 1
+          end
+     end
+
+     #Compute m2_mat
+     m2_tmp_mat = y_mat * bar_y
+
+     for s ∈ 1:S
+          m2_mat[:,:,s] = m2_tmp_mat[:,1+(s-1)*N_terms:N_terms*s]'
+     end
+
+
+     return m2_mat
+end
+
+
+function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
+          
+     #Unload structures
+     @unpack Y0_macro, Y0_ν, Y0_ts, Y0_q, T, n_macro, n_yields, n_re = data_struct
+     @unpack Y0_hat_macro, Y0_hat_ν, Y0_hat_ts, Y0_hat_q, Y0_hat_q_std = pred_struct
+     @unpack S, Π, σ_y, cov, q = rf_struct
+
+     #Compute Residuals: Y0 - Y0_hat
+     ϵ_m = repeat(Y0_macro, 1, S) - Y0_hat_macro
+     ϵ_ν = repeat(Y0_ν - Y0_hat_ν, 1, S)
+     ϵ_y = repeat(Y0_ts, 1, S) - Y0_hat_ts
+     #ϵ_Q = repeat(log.(Y0_q), 1, S) - log.(Y0_hat_q)
+
+     Q_mat = repeat(Y0_q, 1, S)
+     Qhat_mat = Y0_hat_q
+
+     #Precomputation
+     Σ_re = construct_cov_re(rf_struct)
+     Σ_ν = Σ_re[4:6,4:6]
+     Σ_q = Σ_re[1:3,1:3]
+     σ_q = sqrt.(diag(Σ_q))
+     twoP = 2*π
+     #srp2REfac = (twop)^-(n_re/2)
+     log2p = log(twoP)
+     logSrpMacrofac = (-n_macro/2)*log2p
+     logSrpYieldsfac = (-n_yields/2)*log2p
+     logSrpNufac = -(n_re/2)*log2p
+
+     eye_s = Matrix(I, S, S)
+     eye_macro = Matrix(I, n_macro, n_macro)
+     ones_S = ones(1,S)
+
+     macro_ll_cons = Array{Float64}(undef, S, 1)
+     Σ_m = reshape(convert(Array, VectorOfArray(cov)), (3,12))
+     for s ∈ 1:S
+          cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
+          macro_ll_cons[s] = logSrpMacrofac - sum(log.(diag(cholesky(cov_m).U)))
+     end
+     σ_y² = (σ_y^2)*Matrix(I,n_yields, n_yields)
+     yields_ll_cons = logSrpYieldsfac - sum(log.(diag(cholesky(σ_y²).U)))
+     ν_ll_cons = logSrpNufac - sum(log.(diag(cholesky(Σ_ν).U)))
+
+     F = Π'
+
+     #Intialize
+
+     ξ̂_ttm1 = Array{Float64}(undef, S, T+1)
+     ξ̂_tt = Array{Float64}(undef, S, T+1)
+     η = Array{Float64}(undef, S, T)
+     lik_mat = Array{Float64}(undef, T, 1)
+     ξ̂_ttm1[:, 1] = q
+     ξ̂_tt[:, 1] = q
+
+     #Filter
+     for t ∈ 1:T
+          for s ∈ 1:S
+
+               cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
+               ε_m = ϵ_m[t,n_macro*(s-1)+1:n_macro*s]
+               ε_y = ϵ_y[t,n_yields*(s-1)+1:n_yields*s]
+               Q = Q_mat[t,n_re*(s-1)+1:n_re*s]
+               Q̄ = Qhat_mat[t,n_re*(s-1)+1:n_re*s]
+               Q̄_std = Y0_hat_q_std[t,n_re*(s-1)+1:n_re*s]
+               ε_ν = ϵ_ν[t,n_re*(s-1)+1:n_re*s]
+
+               if (t<57)||(t>70)
+
+                    fₐ(Q̂) = pQQmc_1d(Q[1],Q̂,Q̄[1],σ_q[1],Q̄_std[1])
+                    fᵢ(Q̂) = pQQmc_1d(Q[2],Q̂,Q̄[2],σ_q[2],Q̄_std[2])
+                    fₒ(Q̂) = pQQmc_1d(Q[3],Q̂,Q̄[3],σ_q[3],Q̄_std[3])
+
+                    num_intₐ, errₐ = QuadGK(fₐ, Q̄[1] - 12*Q̄_std[1], Q̄[1] + 12*Q̄_std[1])
+                    num_intᵢ, errᵢ = QuadGK(fᵢ, Q̄[2] - 12*Q̄_std[2], Q̄[2] + 12*Q̄_std[2])
+                    num_intₒ, errₒ = QuadGK(fₒ, Q̄[3] - 12*Q̄_std[3], Q̄[3] + 12*Q̄_std[3])
+
+                    num_int_total = log(num_intₐ) + log(num_intᵢ) + log(num_intₒ)
+                    prob_g0_Qmc = log( 1 - normcdf( -Q̄[1] / Q̄_std[1] )) +
+                         log( 1 - normcdf( -Q̄[2] / Q̄_std[3] )) +
+                         log( 1 - normcdf( -Q̄[2] / Q̄_std[3] ))
+
+                    loglik_Q_term = num_int_total - prob_g0_Qmc
+
+                    η[s,t] = macro_ll_cons[s] - 0.5*(ε_m*(cov_m\(ε_m'))) + 
+                         yields_ll_cons - 0.5*(ε_y * (σ_y² \ (ε_y')) ) +
+                         ν_ll_cons - 0.5*(ε_ν * (cov_m \ (Σ_ν') ) ) + loglik_Q_term
+
+
+               else
+
+                    η[s,t] = macro_ll_cons[s] - 0.5*(ε_m*(cov_m\(ε_m'))) + 
+                         yields_ll_cons - 0.5*(ε_y * (σ_y² \ (ε_y')) ) +
+                         ν_ll_cons - 0.5*(ε_ν*(cov_m\(Σ_ν')))
+
+               end
+          end
+
+          #Update filtered probabilities
+          tmp_ll = exp.(η[:,t]) .* ξ̂_ttm1[:, t]
+          lik_mat[t] = ones_S * tmp_ll
+          ξ̂_tt[:,t+1] = tmp_ll ./ lik_mat[t]
+          ξ̂_ttm1[:,t+1] = F * ξ̂_tt[:, t+1]
+
+     end
+
+     #set output 
+     fp = ξ̂_ttm1[:,2:end]'
+     neg_log_lik = -sum(log.(lik_mat))
+
+     return neg_log_lik, fp, ξ̂_tt, ξ̂_tm1 
+          
+end
+
+function construct_cov_re(rf_struct)
+     @unpack σ_q, σ_z, σ_w, σ_ν = rf_struct
+     N = 6
+     
+     Σ_cap = @SMatrix zeros(N,N)
+     Σ_cap[1,1] = σ_q[1]^2
+     Σ_cap[2,2] = σ_q[2]^2
+     Σ_cap[3,3] = σ_q[3]^2
+     Σ_cap[4,4] = σ_z[1]^2 + σ_w[1]^2 + σ_ν[1]^2
+     Σ_cap[5,5] = σ_z[2]^2 + σ_w[2]^2 + σ_ν[2]^2
+     Σ_cap[6,6] = σ_z[3]^2 + σ_w[3]^2 + σ_ν[3]^2
+     Σ_cap[5,4] = σ_z[1]*σ_z[2]
+     Σ_cap[4,5] = σ_q[1]*σ_z[2]
+     Σ_cap[6,4] = σ_z[1]*σ_z[3]
+     Σ_cap[4,6] = σ_q[1]*σ_z[3]
+     Σ_cap[6,5] = σ_z[1]*σ_z[3]
+     Σ_cap[5,6] = σ_q[1]*σ_z[3]
+
+     return Σ_cap
+end
+
+function pQQmc_1d(Q, Q̂, Q̄, σ_re, σ_mc)
+
+     out_pQQ = exp.(-0.5 .* ( ( ( (log(Q)-log(Q̂)) ./ σ_re).^2) + 
+          ( ( (Q̂-Q̄) ./ σ_mc).^2) ) ) ./ (sig_re*sig_mc*2*pi)
+
+     return out_pQQ
+
+end
+
+
+          
+##TODO:
+#    process_data(done)
+#    is_feasible (done)
+#    rf_mdoel to model predictions (done)
+#    construct prior
+#    compute_model_neg_log_lik (done)
+#    create_lag_matrix (done)
+#    project_macro_model (done)
+#    project_ν_cond_macro (done)
+#    approximate_model_prices (done)
+#    project_msvar (done)
 
 export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks, 
      simulate_msvar_cond_regime_path_shock, construct_gamma_macro_array, construct_m0_macro_array, 
