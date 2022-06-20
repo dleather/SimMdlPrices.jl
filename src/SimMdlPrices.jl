@@ -15,6 +15,10 @@ using QuadGK
 using Distributions
 using DelimitedFiles
 using ForwardDiff
+using Optim
+using StatsBase
+using TimerOutputs
+using FastGaussQuadrature
 
 function simulate_ms_var_1_cond_shocks(x0,s0,μ,Φ,Σ,Π,u,ϵ)
      
@@ -208,12 +212,14 @@ function get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂; maxₖ = 1000, tolK = 0.000
      Ωkm1₁ = B₁
      Ωkm1₂ = B₂
      Ωkm1 = [Ωkm1₁,Ωkm1₂]
-     global k_term = 0
-     global Ωk₁ = similar(Ωkm1₁)
-     global Ωk₂ = similar(Ωkm1₁)
-     function f(Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
+     k_term = 0
+     N = size(B₁)[1]
+     Ωk₁ = SMatrix{N,N}(1. * I)
+     Ωk₂ = SMatrix{N,N}(1. * I)
+
+     function f!(Ωk₁, Ωk₂, k_term, Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
                for i ∈ 1:maxₖ
-                    #update Φₖ
+                    #update Φₖ=
                     Ωk₁ = (I - A1₁ * (π_m[1,1] .* Ωkm1[1] + π_m[1,2] .* Ωkm1[2] ) ) \ B₁
                     Ωk₂ = (I - A1₂ * (π_m[2,1] .* Ωkm1[1] + π_m[2,2] .* Ωkm1[2] ) ) \ B₂
 
@@ -235,7 +241,7 @@ function get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂; maxₖ = 1000, tolK = 0.000
           return Ωk₁, Ωk₂, k_term
      end
 
-     Ωk₁,Ωk₂,k_term = f(Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
+     Ωk₁,Ωk₂,k_term = f!(Ωk₁, Ωk₂, k_term,Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
      Φ = [ Ωk₁, Ωk₂ ]
 
      return Φ, k_term
@@ -345,6 +351,7 @@ end
      σ_ν::SMatrix{3, 1, Float64, 3}
      σ_y::Float64
      det_dum::Int64
+     S::Int64
 
 end
 
@@ -394,10 +401,12 @@ function params_to_rf(params)
           augment_macro_fsmsre_nu(μ, Φ, μ_Q, Φ_Q, Σ, γ_gₐ, γ_gᵢ, γ_gₒ, γ_piₐ, γ_piᵢ, γ_piₒ, γ_cₐ, γ_cᵢ, γ_cₒ, ρₐ, ρᵢ, ρₒ, 
                           λ, σ_wₐ, σ_wᵢ, σ_wₒ, σ_zₐ, σ_zᵢ, σ_zₒ,σ_qₐ, σ_qᵢ, σ_qₒ, σ_νₐ, σ_νᵢ, σ_νₒ)
      
+     S = size(Π)[1]
+
      mrfp = ModelReducedFormParams(μ = μ, μ_ν = μ_ν, μ_Q = μ_Q, μ_Q_ν = μ_Q_ν, Φ = Φ, Φ_ν = Φ_ν, 
           Φ_Q = Φ_Q, Φ_Q_ν = Φ_Q_ν, Σ = Σ, Σ_ν = Σ_ν, cov = cov, cov_ν = cov_ν, Π = Π, 
           q = q, det_dum = det_dum, Δ = Δ, Δ_Q = Δ_Q, σ_w = σ_w, σ_z = σ_z, σ_q = σ_q, 
-          σ_ν = σ_ν, σ_y = σ_y)
+          σ_ν = σ_ν, σ_y = σ_y, S = S)
 
      return mrfp
 end
@@ -415,7 +424,7 @@ function augment_macro_fsmsre_nu(μ, Φ, μ_Q, Φ_Q, Σ, γ_gₐ, γ_gᵢ, γ_g�
      σ2_ν = @SMatrix [(σ_wₐ^2 + σ_zₐ^2) σ_zₐ*σ_zᵢ σ_zₐ*σ_zₒ; 
                                     σ_zₐ*σ_zᵢ (σ_wᵢ^2 + σ_zᵢ^2) σ_zᵢ*σ_zₒ; 
                                     σ_zₐ*σ_zₒ  σ_zᵢ*σ_zₒ (σ_wₒ^2 + σ_zₒ^2)]
-     σ_ν = cholesky(σ2_ν).L
+     σ_ν_L = cholesky(σ2_ν).L
 
      μ_ν = [ [μ[1]; Δ*μ[1]+C], [μ[2]; Δ*μ[2]+C], [μ[3]; Δ*μ[3]+C], [μ[4]; Δ*μ[4]+C] ] 
 
@@ -432,10 +441,10 @@ function augment_macro_fsmsre_nu(μ, Φ, μ_Q, Φ_Q, Σ, γ_gₐ, γ_gᵢ, γ_g�
                        SMatrix{6,6,Float64,36}([Φ_Q[3] zeros(N,N); Δ*Φ_Q[3] ρ]),
                        SMatrix{6,6,Float64,36}([Φ_Q[4] zeros(N,N); Δ*Φ_Q[4] ρ])]
      
-     Σ_ν = [ SMatrix{6,6,Float64,36}([Σ[1] zeros(N,N); Δ*Σ[1] σ_ν]),
-                 SMatrix{6,6,Float64,36}( [Σ[2] zeros(N,N); Δ*Σ[2] σ_ν]),
-                 SMatrix{6,6,Float64,36}([Σ[3] zeros(N,N); Δ*Σ[3] σ_ν]),
-                 SMatrix{6,6,Float64,36}([Σ[4] zeros(N,N); Δ*Σ[4] σ_ν])]
+     Σ_ν = [ SMatrix{6,6,Float64,36}([Σ[1] zeros(N,N); Δ*Σ[1] σ_ν_L]),
+                 SMatrix{6,6,Float64,36}( [Σ[2] zeros(N,N); Δ*Σ[2] σ_ν_L]),
+                 SMatrix{6,6,Float64,36}([Σ[3] zeros(N,N); Δ*Σ[3] σ_ν_L]),
+                 SMatrix{6,6,Float64,36}([Σ[4] zeros(N,N); Δ*Σ[4] σ_ν_L])]
 
      cov_ν = [Σ_ν[1]*(Σ_ν[1]'),Σ_ν[2]*(Σ_ν[2]'),Σ_ν[3]*(Σ_ν[3]'),Σ_ν[4]*(Σ_ν[4]')]
      
@@ -845,7 +854,7 @@ end
      T::Int64
      S::Int64
      N_re::Int64
-     N_params::Int64
+     N_θ::Int64
      Q_A_mat::Matrix{Float64}
      Q_I_mat::Matrix{Float64}
      Q_O_mat::Matrix{Float64}
@@ -860,19 +869,21 @@ end
 end
 
 function construct_mc_struct(T, S, N_re, Q_A_mat, Q_I_mat, Q_O_mat, Q_A_std_mat, Q_I_std_mat, 
-     Q_O_std_mat, cap_data, ν_data, Y_data, Macro_data)
+     Q_O_std_mat, cap_data, ν_data, Y_data, Macro_data, N_θ)
 
      mcs = MonteCarloStruct(T = T, S = S, N_re = N_re, Q_A_mat = Q_A_mat, Q_I_mat = Q_I_mat, 
           Q_O_mat = Q_O_mat, Q_A_std_mat = Q_A_std_mat, Q_I_std_mat = Q_I_std_mat, 
           Q_O_std_mat = Q_O_std_mat, cap_data = cap_data, ν_data = ν_data, Y_data = Y_data, 
-          Macro_data = Macro_data)
+          Macro_data = Macro_data,N_θ = N_θ)
 
      return mcs
 
 end
 
+
 function mc_loglik_numint_1d(θ, yield_mat, macro_mat, cap_mat, ν_mat, scale_vec, 
-     filter_dum, Q_mc_mat, σ_mc_mat,log_prior_fn)
+     filter_dum, Q_mc_mat, σ_mc_mat)
+
 
      # θ to reduced-form model solution
      rf_struct = params_to_rf(θ ./ scale_vec)
@@ -884,24 +895,26 @@ function mc_loglik_numint_1d(θ, yield_mat, macro_mat, cap_mat, ν_mat, scale_ve
      feas_dum = is_feasible(rf_struct)
      if feas_dum==0
           neg_log_posterior = Inf
-          fp = NaN
+          fp = adjoint(Matrix{Float64}(undef,1,1))
           sp = NaN
           log_lik = Inf
-          log_prior = Inf
-     end
-     sp = NaN
-
-     # rf_model to model predictions 
-     pred_struct = make_model_predictions(data_struct, rf_struct, Q_mc_mat, σ_mc_mat)
-
-     # rf_model, model_predictions, data --> log-likihood (todo)
-     neg_log_lik, fp, ξ̂_tt, ξ̂_ttm1 = compute_model_neg_log_lik(pred_struct, data_struct, 
-                                        rf_struct)
+          #log_prior = Inf
+     else
      
-     #TODO: Add log-prior function (currently in MATLAB), currently flat priors are assumed
-     log_prior = log_prior_fn(θ)
-     neg_log_posterior = -log_prior + neg_log_lik
-     return neg_log_posterior, fp, sp, log_lik, log_prior
+          sp = NaN
+
+          # rf_model to model predictions 
+          pred_struct = make_model_predictions(data_struct, rf_struct, Q_mc_mat, σ_mc_mat)
+
+          # rf_model, model_predictions, data --> log-likihood (todo)
+          neg_log_lik, fp, ξ̂_tt, ξ̂_ttm1 = compute_model_neg_log_lik(pred_struct, data_struct, 
+                                             rf_struct)
+          
+          #log_prior = log_prior_fn(θ)
+          #neg_log_posterior = -log_prior + neg_log_lik
+          log_lik = -neg_log_lik
+     end
+     return neg_log_lik, fp, sp, log_lik
 
 end
 
@@ -915,7 +928,7 @@ function is_feasible(rf_struct)
      if det_dum == 0
           feas_dum = 0
      else
-          if !((any(Φ₁.==NaN))&&(any(Φ₂.==NaN)))
+          if (any(Φ₁.==NaN))||(any(Φ₂.==NaN))
                feas_dum = 0
           end
      end
@@ -966,7 +979,8 @@ function process_data(yield_data,macro_data,cap_data,ν_data)
      Y_macro = [macro_data yield_data[:,1]]
      Y_ts = yield_data[:,2:n_Y]
      Y_ν = ν_data[:,1:num_re]
-     Y_q = 1 ./ Y_cap
+     Y_cap = cap_data
+     Y_q = 1 ./ cap_data
 
      #Create lag matrix (TODO)
      Y0_macro,Y1_macro = create_lag_matrix(Y_macro)
@@ -1006,13 +1020,14 @@ function make_model_predictions(data_struct, rf_struct, Q_mc_mat, std_mc_mat)
 
      #unload structures
      @unpack Y1_macro, Y0_macro, Y0_ν, n_yields, T = data_struct
-     @unpack S = rf_struct
+     @unpack Π = rf_struct
+     S = size(Π)[1]
 
      #Given Y1_macro, predict Y0_macro 
      Y0_hat_macro = project_macro_model(Y1_macro, rf_struct)
 
      #Given Y0_macro predict NOI growth 
-     Y0_hat_ν = project_ν_cond_macro(Y1_macro, rf_struct)
+     Y0_hat_ν = project_ν_cond_macro(data_struct, rf_struct)
 
      #Given Y0_macro predict term-structure using quadratic approx 
      Y0_macro_ν = [Y0_macro Y0_ν]
@@ -1070,7 +1085,7 @@ function project_ν_cond_macro(data_struct, rf_struct)
      B_macro = Δ[:,1:3]
      B_ν = Δ[:,4:6]
 
-     Y0_hat_ν = (C + B_macro*(Y0_macro') + B_ν*(Y1_ν'))
+     Y0_hat_ν = (C .+ B_macro*(Y0_macro') + B_ν*(Y1_ν'))'
 
      return Y0_hat_ν   
      
@@ -1144,7 +1159,7 @@ function compute_quadratic_pricing_factors_msvar(δ, cf_mat, Π, μ_Q, Φ_Q, cov
      i_cf = 1
      for cf ∈ 1:max_n
           if cf > 1
-               A_term_mat = @SMatrix zeros(undef, S, S)
+               A_term_mat = Array{Float64}(undef, S, S)
                B_term_mat = Array{Float64}(undef, N, S, S)
                C_term_mat = Array{Float64}(undef, S, S)
                D_term_mat = Array{Float64}(undef, N, S, S)
@@ -1153,17 +1168,17 @@ function compute_quadratic_pricing_factors_msvar(δ, cf_mat, Π, μ_Q, Φ_Q, cov
                for j ∈ 1:S #s_{t+1}
                     μⱼ = μ_Q[j]
                     Φⱼ = Φ_Q[j]
-                    A_term = tmp_A[jj] + μⱼ'*tmp_B[:,j]
+                    A_term = tmp_A[j] .+ μⱼ'*tmp_B[:,j]
                     B_term = Φⱼ'*tmp_B[:,j]
-                    C_term = tmp_C[j] + μⱼ'*tmp_D[:,j] + μⱼ'*tmp_F[:,:,j]*μⱼ + 
-                         tr(tmp_f[:,:,j]*cov[j])
+                    C_term = tmp_C[j] .+ μⱼ'*tmp_D[:,j] .+ μⱼ'*tmp_F[:,:,j]*μⱼ .+ 
+                         tr(tmp_F[:,:,j]*cov[j])
                     D_term = Φⱼ' * (tmp_D[:,j] + 2. .* tmp_F[:,:,j]' * μⱼ)
                     F_term = Φⱼ' * tmp_F[:,:,j] * Φⱼ
 
                     for i ∈ 1:S #s_t
-                         A_term_mat[i,j] = Π[i,j] .* A_term
+                         A_term_mat[i,j] = Π[i,j] ⋅ A_term
                          B_term_mat[:,i,j] =  Π[i,j] .* B_term
-                         C_term_mat[i,j] = Π[i,j] .* C_term
+                         C_term_mat[i,j] = Π[i,j] ⋅ C_term
                          D_term_mat[:,i,j] =  Π[i,j] .* D_term
                          F_term_mat[:,:,i,j] = Π[i,j] .* F_term
 
@@ -1178,9 +1193,9 @@ function compute_quadratic_pricing_factors_msvar(δ, cf_mat, Π, μ_Q, Φ_Q, cov
 
                for i=1:S
                     A_cell[i,i_cf] = A_term_i[i]
-                    B_cell[i,i_cf] = δ + B_term_i[:,i]
+                    B_cell[i,i_cf] = δ .+ B_term_i[:,i]
                     C_cell[i,i_cf] = C_term_i[i]
-                    D_cell[i,i_cf] = 2. .* A_term_i[i] * δ +  D_term_i[:,i]
+                    D_cell[i,i_cf] = 2. .* A_term_i[i] * δ .+  D_term_i[:,i]
                     F_cell[i,i_cf] = -δ*δ' + δ*B_cell[i,i_cf]' + B_cell[i,i_cf]*δ' + 
                                      F_term_i[:,:,i]
                end
@@ -1257,7 +1272,7 @@ end
 function compute_m2_cond_x(x_mat, C, D, F)
 
      N,T = size(x_mat)
-     S,N_terms = size(C[1])
+     S,N_terms = size(C)
      m2_mat = Array{Float64}(undef, N_terms, T, S)
 
      #Define y_mat matrix: [1, x_t', vec(x_t * x_t')']_t (T x (1 + N + N^2))
@@ -1274,7 +1289,7 @@ function compute_m2_cond_x(x_mat, C, D, F)
      bar_y[1,:] = reshape(C', 1, N_terms*S)
      bar_y[2:N+1,:] = dropdims(convert(Array,VectorOfArray(vec(reshape(permutedims(D),1,
           N_terms*S)))), dims = 2)
-     bar_y = [bar_y_1; bar_y_2]
+     #bar_y = [bar_y_1; bar_y_2]
      
      cnt = 1
      for s ∈ 1:S
@@ -1297,7 +1312,7 @@ end
 
 
 function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
-          
+     
      #Unload structures
      @unpack Y0_macro, Y0_ν, Y0_ts, Y0_q, T, n_macro, n_yields, n_re = data_struct
      @unpack Y0_hat_macro, Y0_hat_ν, Y0_hat_ts, Y0_hat_q, Y0_hat_q_std = pred_struct
@@ -1350,26 +1365,25 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      ξ̂_tt[:, 1] = q
 
      #Filter
-     for t ∈ 1:T
-          for s ∈ 1:S
-
-               cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
-               ε_m = ϵ_m[t,n_macro*(s-1)+1:n_macro*s]
-               ε_y = ϵ_y[t,n_yields*(s-1)+1:n_yields*s]
-               Q = Q_mat[t,n_re*(s-1)+1:n_re*s]
-               Q̄ = Qhat_mat[t,n_re*(s-1)+1:n_re*s]
-               Q̄_std = Y0_hat_q_std[t,n_re*(s-1)+1:n_re*s]
-               ε_ν = ϵ_ν[t,n_re*(s-1)+1:n_re*s]
+     @inbounds for t ∈ 1:T
+          @inbounds for s ∈ 1:S
+               Is = @view eye_s[:,s]
+               cov_m = Σ_m * kron(Is, eye_macro)
+               ε_m = @view ϵ_m[t,n_macro*(s-1)+1:n_macro*s]
+               ε_y = @view ϵ_y[t,n_yields*(s-1)+1:n_yields*s]
+               Q = @view Q_mat[t,n_re*(s-1)+1:n_re*s]
+               Q̄ = @view Qhat_mat[t,n_re*(s-1)+1:n_re*s]
+               Q̄_std = @view Y0_hat_q_std[t,n_re*(s-1)+1:n_re*s]
+               ε_ν = @view ϵ_ν[t,n_re*(s-1)+1:n_re*s]
 
                if (t<57)||(t>70)
-
                     fₐ(Q̂) = pQQmc_1d(Q[1],Q̂,Q̄[1],σ_q[1],Q̄_std[1])
                     fᵢ(Q̂) = pQQmc_1d(Q[2],Q̂,Q̄[2],σ_q[2],Q̄_std[2])
                     fₒ(Q̂) = pQQmc_1d(Q[3],Q̂,Q̄[3],σ_q[3],Q̄_std[3])
-
-                    num_intₐ, errₐ = QuadGK(fₐ, Q̄[1] - 12*Q̄_std[1], Q̄[1] + 12*Q̄_std[1])
-                    num_intᵢ, errᵢ = QuadGK(fᵢ, Q̄[2] - 12*Q̄_std[2], Q̄[2] + 12*Q̄_std[2])
-                    num_intₒ, errₒ = QuadGK(fₒ, Q̄[3] - 12*Q̄_std[3], Q̄[3] + 12*Q̄_std[3])
+                    
+                    num_intₐ, errₐ = quadgk(fₐ, Q̄[1] - 5*Q̄_std[1], Q̄[1] + 5*Q̄_std[1])
+                    num_intᵢ, errᵢ = quadgk(fᵢ, Q̄[2] - 5*Q̄_std[2], Q̄[2] + 5*Q̄_std[2])
+                    num_intₒ, errₒ = quadgk(fₒ, Q̄[3] - 5*Q̄_std[3], Q̄[3] + 5*Q̄_std[3])
 
                     num_int_total = log(num_intₐ) + log(num_intᵢ) + log(num_intₒ)
                     prob_g0_Qmc = log( 1 - normcdf( -Q̄[1] / Q̄_std[1] )) +
@@ -1378,41 +1392,42 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
 
                     loglik_Q_term = num_int_total - prob_g0_Qmc
 
-                    η[s,t] = macro_ll_cons[s] - 0.5*(ε_m*(cov_m\(ε_m'))) + 
-                         yields_ll_cons - 0.5*(ε_y * (σ_y² \ (ε_y')) ) +
-                         ν_ll_cons - 0.5*(ε_ν * (cov_m \ (Σ_ν') ) ) + loglik_Q_term
+                    η[s,t] = macro_ll_cons[s] - 0.5*((ε_m')*(cov_m\ε_m)) + 
+                         yields_ll_cons - 0.5*((ε_y') * (σ_y² \ ε_y)) +
+                         ν_ll_cons - 0.5*((ε_ν') * (Σ_ν \ ε_ν )) + loglik_Q_term
 
 
                else
 
-                    η[s,t] = macro_ll_cons[s] - 0.5*(ε_m*(cov_m\(ε_m'))) + 
-                         yields_ll_cons - 0.5*(ε_y * (σ_y² \ (ε_y')) ) +
-                         ν_ll_cons - 0.5*(ε_ν*(cov_m\(Σ_ν')))
+                    η[s,t] = macro_ll_cons[s] - 0.5*((ε_m') * (cov_m \ ε_m)) + 
+                         yields_ll_cons - 0.5*((ε_y') * (σ_y² \ ε_y) ) +
+                         ν_ll_cons - 0.5*((ε_ν') * (Σ_ν \ ε_ν )) 
 
                end
           end
 
           #Update filtered probabilities
           tmp_ll = exp.(η[:,t]) .* ξ̂_ttm1[:, t]
-          lik_mat[t] = ones_S * tmp_ll
+          lik_mat[t] = ones_S ⋅ tmp_ll
           ξ̂_tt[:,t+1] = tmp_ll ./ lik_mat[t]
           ξ̂_ttm1[:,t+1] = F * ξ̂_tt[:, t+1]
 
      end
 
+
      #set output 
      fp = ξ̂_ttm1[:,2:end]'
      neg_log_lik = -sum(log.(lik_mat))
 
-     return neg_log_lik, fp, ξ̂_tt, ξ̂_tm1 
+     return neg_log_lik, fp, ξ̂_tt, ξ̂_ttm1
           
 end
 
 function construct_cov_re(rf_struct)
      @unpack σ_q, σ_z, σ_w, σ_ν = rf_struct
-     N = 6
+     N = 6 
      
-     Σ_cap = @SMatrix zeros(N,N)
+     Σ_cap = @MMatrix zeros(N,N)
      Σ_cap[1,1] = σ_q[1]^2
      Σ_cap[2,2] = σ_q[2]^2
      Σ_cap[3,3] = σ_q[3]^2
@@ -1420,11 +1435,11 @@ function construct_cov_re(rf_struct)
      Σ_cap[5,5] = σ_z[2]^2 + σ_w[2]^2 + σ_ν[2]^2
      Σ_cap[6,6] = σ_z[3]^2 + σ_w[3]^2 + σ_ν[3]^2
      Σ_cap[5,4] = σ_z[1]*σ_z[2]
-     Σ_cap[4,5] = σ_q[1]*σ_z[2]
+     Σ_cap[4,5] = σ_z[1]*σ_z[2]
      Σ_cap[6,4] = σ_z[1]*σ_z[3]
-     Σ_cap[4,6] = σ_q[1]*σ_z[3]
-     Σ_cap[6,5] = σ_z[1]*σ_z[3]
-     Σ_cap[5,6] = σ_q[1]*σ_z[3]
+     Σ_cap[4,6] = σ_z[1]*σ_z[3]
+     Σ_cap[6,5] = σ_z[2]*σ_z[3]
+     Σ_cap[5,6] = σ_z[2]*σ_z[3]
 
      return Σ_cap
 end
@@ -1432,12 +1447,10 @@ end
 function pQQmc_1d(Q, Q̂, Q̄, σ_re, σ_mc)
 
      out_pQQ = exp.(-0.5 .* ( ( ( (log(Q)-log(Q̂)) ./ σ_re).^2) + 
-          ( ( (Q̂-Q̄) ./ σ_mc).^2) ) ) ./ (sig_re*sig_mc*2*pi)
+          ( ( (Q̂-Q̄) ./ σ_mc).^2) ) ) ./ (σ_re*σ_mc*2*pi)
 
      return out_pQQ
-
 end
-
 
 function create_mvn_dist(μ,Ω)
      d = MvNormal(μ,Ω)
@@ -1574,7 +1587,7 @@ function create_mvn_dist(μ,Ω)
  end
  
  #Define parameter structure
- @with_kw struct PriorStruct
+ @with_kw struct PriorStruct{F}
      μ::Vector{Float64}
      Ω::Matrix{Float64}
      μₙ::Vector{Float64}
@@ -1591,7 +1604,7 @@ function create_mvn_dist(μ,Ω)
      d_n::FullNormal
      N_θ::Int64
      draw_prior::Function
-     eval_logprior::Function
+     eval_logprior::F
  
  end
  
@@ -1641,11 +1654,11 @@ function create_mvn_dist(μ,Ω)
  end
  
  #Generate eval_logprior
- function generate_eval_logprior(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,f_array,
-                                 absdetjac_fn)
+ function generate_eval_logprior(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,mvn_tsm_ndx,
+                                 f_array,absdetjac_fn)
  
-     gen_eval_logprior = function(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,f_array,
-                                  absdetjac_fn)
+     gen_eval_logprior = function(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,mvn_tsm_ndx,
+                                  f_array,absdetjac_fn)
  
          function eval_logprior(θ)
  
@@ -1661,8 +1674,8 @@ function create_mvn_dist(μ,Ω)
  
      end
  
-     eval_logprior = gen_eval_logprior(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,f_array,
-                         absdetjac_fn)
+     eval_logprior = gen_eval_logprior(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,
+                                       mvn_tsm_ndx,f_array,absdetjac_fn)
  
      return eval_logprior
 
@@ -1670,7 +1683,7 @@ function create_mvn_dist(μ,Ω)
  
  
  #Write wrapper code to define prior_struct
- function contruct_prior_struct(mvn_cap_ndx,mvn_tsm_ndx,n_ndx,exp_ndx,Ω_fp,μ_fp,λ_fp,μ_n_fp,σ_fp)
+ function construct_prior_struct(mvn_cap_ndx,mvn_tsm_ndx,n_ndx,exp_ndx,Ω_fp,μ_fp,λ_fp,μ_n_fp,σ_fp)
      #Current;y, f_array and f_inv are hardcoded to match MATLAB
      #TODO: Change this to general code
  
@@ -1689,8 +1702,8 @@ function create_mvn_dist(μ,Ω)
  
      #Fill out function of transformations from θ -> f(θ)
      f(x) = x
-     f_array = Array{Function}(undef, N_params)
-     finv_array = Array{Function}(undef, N_params)
+     f_array = Array{Function}(undef, N_θ)
+     finv_array = Array{Function}(undef, N_θ)
  
      f_array[1] = x -> log( (x  + 78.294795802327087)./400 + sqrt(eps()) )
      finv_array[1] = x -> 400 .* (exp(x) -78.294795802327087./400 - sqrt(eps()))
@@ -1736,12 +1749,30 @@ function create_mvn_dist(μ,Ω)
  
      #Create Radon-Nikodyn term
      
-     h = x -> map.(finv_array,x)
-     jacob_fn = x -> ForwardDiff.jacobian(h,map.(f_array,x))
-     absdetjac_fn = x -> abs(det(jacob_fn(x)))
+     
+     function  gen_h(f_arr)
+     
+          function h_fn(x)
+               θ_out = zero(x)
+               for i in 1:size(x)[1]
+                    θ_out[i] = f_arr[i](x[i])
+               end
+          
+               return θ_out
+          end
+     
+          return h_fn
+
+     end
+     
+     h = gen_h(finv_array)
+     g = gen_h(f_array)
+     
+     jacob_fn = x::Matrix{Float64} -> ForwardDiff.jacobian(h,g(x))::Matrix{Float64}
+     absdetjac_fn = x::Matrix{Float64} -> abs(det(jacob_fn(x)))::Float64
  
      eval_logprior = generate_eval_logprior(d_mvn,d_n,d_exp,n_ndx,exp_ndx,mvn_cap_ndx,
-                         f_array,absdetjac_fn)
+                                            mvn_tsm_ndx,f_array,absdetjac_fn)
  
      #Define structure
      prior_struct = PriorStruct(μ = μ, Ω = Ω, μₙ = μₙ, σ = σ, λ = λ, f_array = f_array,
@@ -1755,7 +1786,7 @@ function create_mvn_dist(μ,Ω)
 
 #Contruct prior using defaults from MATLAB
 #TODO: Eventually I may want to generalize this funciton
-function contruct_prior_default()
+function construct_prior_default()
      #set parameters
      mvn_cap_ndx = [1:15;17:26;52:55]
      exp_ndx = [16;39:50]
@@ -1767,25 +1798,119 @@ function contruct_prior_default()
      σ_fp = "prior/n_se_mat.csv"
      λ_fp = "prior/lambda_mat.csv"
 
-     prior_struct = contruct_prior_struct(mvn_cap_ndx,mvn_tsm_ndx,n_ndx,exp_ndx,Ω_fp,μ_fp,
+     prior_struct = construct_prior_struct(mvn_cap_ndx,mvn_tsm_ndx,n_ndx,exp_ndx,Ω_fp,μ_fp,
                                           λ_fp,μ_n_fp,σ_fp)
 
      return prior_struct
 
 end
 
+function construct_Q_mats(Q_A_mc_mat,Q_I_mc_mat,Q_O_mc_mat,Q_A_std_mc_mat,Q_I_std_mc_mat,
+     Q_O_std_mc_mat)
+
+     T,S = size(Q_A_mc_mat)
+     n_re = 3
+
+     Q_mc_mat = Matrix{Float64}(undef,T,n_re*S)
+     σ_mc_mat = Matrix{Float64}(undef,T,n_re*S)
+
+     for s = 1:S
+          Q_mc_mat[:,1+(s-1)*n_re:n_re*s] = [Q_A_mc_mat[:,s] Q_I_mc_mat[:,s] Q_O_mc_mat[:,s]]
+          σ_mc_mat[:,1+(s-1)*n_re:n_re*s] = 
+               [Q_A_std_mc_mat[:,s] Q_I_std_mc_mat[:,s] Q_O_std_mc_mat[:,s]]
+     end
+
+     return Q_mc_mat, σ_mc_mat
+end
+
+
+function get_mc_posterior_quadrature(θ,mcs,ps)
+
+     @unpack Q_A_mat,Q_I_mat,Q_O_mat,Q_A_std_mat,Q_I_std_mat,Q_O_std_mat,T,S,
+         cap_data, Macro_data, ν_data, Y_data, S = mcs
+ 
+     ndx_vec = [26,41,42,45,46,49,50]
+
+     
+     Q_mc_mat, σ_mc_mat = construct_Q_mats(Q_A_mat,Q_I_mat,Q_O_mat,Q_A_std_mat,Q_I_std_mat,
+                                           Q_O_std_mat)
+
+ 
+     #Set inital values
+     θ[ndx_vec[1]] = 0.005
+     θ[ndx_vec[2:2:6]] .= 0.005
+     for (cnt,j) in enumerate(3:2:7)
+         tmp_err = repeat(log.(400. ./ cap_data[2:end,cnt]),1,S) - 
+               log.(Q_mc_mat[2:end,1+(cnt-1)*4:cnt*4])
+         θ[ndx_vec[j]] = std(tmp_err[:])
+     end
+ 
+ 
+     obj_fn_ll(in_vec) = mc_loglik_numint_1d(reshape([θ[1:25];in_vec[1];θ[27:40];
+          in_vec[2:3];θ[43:44];in_vec[4:5];θ[47:48];in_vec[6:7];θ[51:55]],length(θ),1),
+          Y_data,Macro_data, cap_data, ν_data,ones(55,1), 1, Q_mc_mat, σ_mc_mat)
           
-##TODO:
-#    process_data(done)
-#    is_feasible (done)
-#    rf_mdoel to model predictions (done)
-#    construct prior (done)
-#    compute_model_neg_log_lik (done)
-#    create_lag_matrix (done)
-#    project_macro_model (done)
-#    project_ν_cond_macro (done)
-#    approximate_model_prices (done)
-#    project_msvar (done)
+     obj_fn_lp = let eval_logprior=ps.eval_logprior
+          (x)-> eval_logprior(reshape([θ[1:25];x[1];θ[27:40];x[2:3];θ[43:44];x[4:5];
+                              θ[47:48];x[6:7];θ[51:55]],length(θ),1))
+     end
+     
+     obj_fn_lpost(in_vec) = obj_fn_ll(in_vec)[1] - obj_fn_lp(in_vec)
+
+ 
+     init_vec = [θ[26];θ[41:42];θ[45:46];θ[49:50]]
+     neg_log_posterior = obj_fn_lpost(init_vec)
+ 
+ 
+     ccnt = 1
+     trig = 0
+     if (isnan(neg_log_posterior)|isinf(neg_log_posterior))
+          while (trig==0)&(ccnt<=20)
+               init_vec = init_vec .* 2.0
+               neg_log_posterior = obj_fn_lpost(init_vec)
+               if ~(isnan(neg_log_posterior)|isinf(neg_log_posterior))
+                    trig = 1
+               else
+                    ccnt = ccnt + 1
+               end
+          end
+     end
+
+     for j=1:size(ndx_vec)[1]
+
+          obj_fn_ll_2(meas) = mc_loglik_numint_1d(reshape([θ[1:ndx_vec[j]-1];meas[1];
+               θ[ndx_vec[j]+1:end]],length(θ),1), Y_data,Macro_data, cap_data, ν_data,
+               ones(55,1), 1, Q_mc_mat, σ_mc_mat)
+          obj_fn_lp_2 = let eval_logprior = ps.eval_logprior
+               (x) -> eval_logprior(reshape([θ[1:ndx_vec[j]-1];x[1];θ[ndx_vec[j]+1:end]],
+                                             length(θ),1))
+          end
+          obj_fn_lpost_2(meas) = obj_fn_ll_2(meas)[1] - obj_fn_lp_2(meas)
+
+     
+          obj_fn_uc(in_vec) = obj_fn_lpost_2(exp(in_vec[1]))
+          
+          res = optimize(obj_fn_uc,[log(init_vec[j])])
+          
+          θ̂ = exp(Optim.minimizer(res)[1])
+          
+          #init_vec[j] = θ̂
+          #neg_log_posterior, fp, sp, log_lik, log_prior =  obj_fn(init_vec)
+          
+          θ[ndx_vec[j]] = θ̂
+     end
+     
+     θ_new = θ
+ 
+     init_vec = θ[ndx_vec]
+     ~, ~, ~, ll = obj_fn_ll(init_vec)
+     lprior = obj_fn_lp(init_vec)
+     lpost = lprior + ll
+     
+     return lpost, ll, lprior, θ_new
+ end
+
+
 
 export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks, 
      simulate_msvar_cond_regime_path_shock, construct_gamma_macro_array, construct_m0_macro_array, 
@@ -1794,7 +1919,10 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      compute_drift_sigma_fmmsre, compute_μ_Σ_fmmsre, construct_structural_parameters, params_to_rf, 
      augment_macro_fsmsre_nu, simulate_nu_cond_x_i_shock_rn, compute_mc_real_estate_Q_cond_x_i_nofull,
      compute_mc_term_structure_cond_x, compute_std_over_subsamples, compute_mean_over_subsamples,
-     simulate_model_prices_cond_shock_acc_ts,contruct_prior_default
+     simulate_model_prices_cond_shock_acc_ts,construct_prior_default, construct_Q_mats,
+     mc_loglik_numint_1d, construct_mc_struct, get_mc_posterior_quadrature, process_data,
+     is_feasible, make_model_predictions, compute_model_neg_log_lik, construct_prior_struct,
+     get_prior_distributions, generate_draw_prior_fn,  generate_eval_logprior
 
 
 end
