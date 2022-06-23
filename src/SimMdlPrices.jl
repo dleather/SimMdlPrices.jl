@@ -17,8 +17,7 @@ using DelimitedFiles
 using ForwardDiff
 using Optim
 using StatsBase
-using TimerOutputs
-using FastGaussQuadrature
+using FillArrays
 
 function simulate_ms_var_1_cond_shocks(x0,s0,μ,Φ,Σ,Π,u,ϵ)
      
@@ -149,8 +148,7 @@ function transform_struct_to_rf(b0₁, b0₂, bm1₁, bm1₂, b1₁, b1₂, m0�
 
      # Compute composite Markov transition matrix and its ergodic distribution
      Π = kron(π_m, π_d)
-     mc = MarkovChain(Π)
-     q = stationary_distributions(mc)[1]
+     q = get_ergodic_markov_dist(Π)
 
      #Compute forward-looking RE equilibrium
      F1₁ = b0₁ \ bm1₁ 
@@ -218,10 +216,14 @@ function get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂; maxₖ = 1000, tolK = 0.000
      Ωk₂ = SMatrix{N,N}(1. * I)
 
      function f!(Ωk₁, Ωk₂, k_term, Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
+               Ξ₁ = similar(Ωk₁)
+               Ξ₂ = similar(Ωk₂)
                for i ∈ 1:maxₖ
-                    #update Φₖ=
-                    Ωk₁ = (I - A1₁ * (π_m[1,1] .* Ωkm1[1] + π_m[1,2] .* Ωkm1[2] ) ) \ B₁
-                    Ωk₂ = (I - A1₂ * (π_m[2,1] .* Ωkm1[1] + π_m[2,2] .* Ωkm1[2] ) ) \ B₂
+                    #update Φₖ
+                    Ξ₁ =  (I - A1₁ * (π_m[1,1] .* Ωkm1[1] + π_m[1,2] .* Ωkm1[2] ) ) 
+                    Ξ₂ =  (I - A1₂ * (π_m[2,1] .* Ωkm1[1] + π_m[2,2] .* Ωkm1[2] ) ) 
+                    Ωk₁ = Ξ₁ \ B₁
+                    Ωk₂ = Ξ₂ \ B₂
 
                     #Check for convergence
                     dist = max( maximum(abs.( Ωk₁ - Ωkm1[1] )), 
@@ -238,15 +240,109 @@ function get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂; maxₖ = 1000, tolK = 0.000
                     end
 
                end
-          return Ωk₁, Ωk₂, k_term
+          return Ωk₁, Ωk₂, k_term, Ξ₁, Ξ₂
      end
 
-     Ωk₁,Ωk₂,k_term = f!(Ωk₁, Ωk₂, k_term,Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
+     Ωk₁,Ωk₂,k_term, Ξ₁, Ξ₂ = f!(Ωk₁, Ωk₂, k_term,Ωkm1,maxₖ,A1₁, A1₂,π_m,B₁,B₂,tolK)
      Φ = [ Ωk₁, Ωk₂ ]
-
-     return Φ, k_term
+     Ξ = [ Ξ₁, Ξ₂ ]
+     return Φ, k_term, Ξ
 
 end
+
+function check_determinancy_fmsre(Φ, Ξ, A1₁, A1₂, Σ1_11, Σ1_12, Σ1_21, Σ1_22; maxK = 1000)
+     # This code follows the MATLAB code provided by SeongHoon Cho's website for the paper
+     # "Sufficient Conditions and Determinancy in a Class of Markov-Switching Rational
+     # Expectations Models" (Cho & Moreno, Review of Economic Dynamics 2016).
+     # It computes determinancy of the model in the case of no sunspot solution.
+     # The code does not estimate determinacy in the case of a sun spot solutions.
+     # All sunspot solutions will output indeterminant.
+
+     S = size(Φ,1)
+     n = size(Φ[1],1)
+     m = n
+
+     Ã = [A1₁, A1₁, A1₂, A1₂]
+     C = [Σ1_11, Σ1_12, Σ1_21, Σ1_22]
+
+     A = Array{Array{Float64}}(undef, S, S)
+     for i in 1:S
+          for j in 1:S
+               A[i,j] = Ã[i] 
+          end
+     end
+
+     R = Array{Array{Float64}}(undef, S)
+     for j in 1:S
+          R[j] = zeros(m,m)
+     end
+      
+     FK = Array{Array{Float64}}(undef, S, S) # n x n
+     for i=1:S
+          for j=1:S
+               FK[i,j] = Ξ[s] \ A[i,j] 
+          end
+     end
+
+     Psi_RtkFK = Array{Float64}(undef, n*m*S,n*m*S)
+     for i=1:S
+          Psi_RtkFKrow = Array{Float64}(undef, n*m,n*m*S)
+          for j=1:S
+               Psi_RtkFKrow[:,1+(j-1)*n*m:j*m*n] = P[i,j].*kron(R[j]',FK[i,j])
+          end
+          Psi_RtkFK[1+(i-1)*n*m:i*m*n,:] = Psi_RtkFKrow
+     end
+     R_Psi_RtkFK=maximum(abs.(eigen(Psi_RtkFK).values))
+
+     FCC1 = termK
+     FCC2 = R_Psi_RtkFK
+     FCC = [FCC1 FCC2]
+
+     vvC = Vector{Float64}(undef, n*m*S)
+     for i=1:S 
+          #InvXiC=Xi(termK,i)\C(i,1) (n x m)
+          InvXiC= Ξ[i] \ C[i,1]
+          vvC[1+(i-1)*n*m:i*n*m]  = InvXiC[:]  
+     end
+     vvGamma = (I-Psi_RtkFK) \ vvC
+     vGamma = reshape(vvGamma,n*m,S)
+
+     GammaK = Array{Array{Float64}}(undef, S)
+     for i=1:S
+          GammaK[i] = reshape(vGamma[:,i],n,m) 
+     end
+
+     bdiagOm2 = zeros(n^2*S,n^2*S)
+     for i=1:S 
+          bdiagOm2[n^2*(i-1)+1:n^2*i,n^2*(i-1)+1:n^2*i] = kron(Φ[i],Φ[i])
+     end
+     BarPsi_OKkOK = bdiagOm2 * kron(P',Matrix{Float64}(I,n^2,n^2)) 
+     
+     Psi_FKkFK = Array{Float64}(undef,n*n*S,n*n*S) # Psi_[kron(FK,FK)]
+     for i=1:S
+          Psi_FKkFKrow = Array{Float64}(undef, n*n, n*n*S)
+          for j=1:S
+               Psi_FKkFKrow[:,1+(j-1)*n*n:j*n*n] = P[i,j].*kron(FK[i,j],FK[i,j])
+          end
+          Psi_FKkFK[1+(i-1)*n*n:i*n*n,:] = Psi_FKkFKrow
+     end
+     
+     R_BarPsi_OKkOK = maximum(abs.(eigen(BarPsi_OKkOK).values)) 
+     R_Psi_FKkFK  = maximum(abs.(eigen(Psi_FKkFK).values)) 
+     DET1 = R_BarPsi_OKkOK
+     DET2 = R_Psi_FKkFK
+     DET = [DET1 DET2]
+
+     #Determine if determinant or not
+     if (FCC[1] < maxK) && (DET[1] < 1) && (DET[2] <= 1) 
+          det_dum = 1 #Determinant
+     else
+          det_dum  = 0 #Indeterminant
+     end
+
+     return det_dum, FCC, DET
+end
+
 
 function  compute_μ_Σ_fmmsre(Φ, A1₁, A1₂, m1₁, m1₂, Σ1_11, Σ1_12, Σ1_21, Σ1_22, π_m)
 
@@ -1319,9 +1415,9 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      @unpack S, Π, σ_y, cov, q = rf_struct
 
      #Compute Residuals: Y0 - Y0_hat
-     ϵ_m = repeat(Y0_macro, 1, S) - Y0_hat_macro
-     ϵ_ν = repeat(Y0_ν - Y0_hat_ν, 1, S)
-     ϵ_y = repeat(Y0_ts, 1, S) - Y0_hat_ts
+     ϵ_m = 100. .* ( repeat(Y0_macro, 1, S) - Y0_hat_macro)
+     ϵ_ν = 100. .* (repeat(Y0_ν - Y0_hat_ν, 1, S))
+     ϵ_y = 100. .* (repeat(Y0_ts, 1, S) - Y0_hat_ts)
      #ϵ_Q = repeat(log.(Y0_q), 1, S) - log.(Y0_hat_q)
 
      Q_mat = repeat(Y0_q, 1, S)
@@ -1329,10 +1425,10 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
 
      #Precomputation
      Σ_re = construct_cov_re(rf_struct)
-     Σ_ν = Σ_re[4:6,4:6]
+     Σ_ν = (100.0^2) .* Σ_re[4:6,4:6]
      Σ_q = Σ_re[1:3,1:3]
      σ_q = sqrt.(diag(Σ_q))
-     twoP = 2*π
+     twoP = 2. * π
      #srp2REfac = (twop)^-(n_re/2)
      log2p = log(twoP)
      logSrpMacrofac = (-n_macro/2)*log2p
@@ -1344,12 +1440,12 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      ones_S = ones(1,S)
 
      macro_ll_cons = Array{Float64}(undef, S, 1)
-     Σ_m = reshape(convert(Array, VectorOfArray(cov)), (3,12))
+     Σ_m = (100.0^2) .* reshape(convert(Array, VectorOfArray(cov)), (3,12))
      for s ∈ 1:S
           cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
           macro_ll_cons[s] = logSrpMacrofac - sum(log.(diag(cholesky(cov_m).U)))
      end
-     σ_y² = (σ_y^2)*Matrix(I,n_yields, n_yields)
+     σ_y² = (100.0^2) .* (σ_y^2)*Matrix(I,n_yields, n_yields)
      yields_ll_cons = logSrpYieldsfac - sum(log.(diag(cholesky(σ_y²).U)))
      ν_ll_cons = logSrpNufac - sum(log.(diag(cholesky(Σ_ν).U)))
 
@@ -1380,10 +1476,19 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
                     fₐ(Q̂) = pQQmc_1d(Q[1],Q̂,Q̄[1],σ_q[1],Q̄_std[1])
                     fᵢ(Q̂) = pQQmc_1d(Q[2],Q̂,Q̄[2],σ_q[2],Q̄_std[2])
                     fₒ(Q̂) = pQQmc_1d(Q[3],Q̂,Q̄[3],σ_q[3],Q̄_std[3])
-                    
-                    num_intₐ, errₐ = quadgk(fₐ, Q̄[1] - 5*Q̄_std[1], Q̄[1] + 5*Q̄_std[1])
-                    num_intᵢ, errᵢ = quadgk(fᵢ, Q̄[2] - 5*Q̄_std[2], Q̄[2] + 5*Q̄_std[2])
-                    num_intₒ, errₒ = quadgk(fₒ, Q̄[3] - 5*Q̄_std[3], Q̄[3] + 5*Q̄_std[3])
+                    n_sd = 5.
+                    #if any((Q̄ - n_sd .* Q̄_std) .< 0.)
+                    #     while (any((Q̄ - n_sd .* Q̄_std) .< 0.))||(n_sd==0.)
+                    #          n_sd = n_sd - 1.
+                    #     end
+                    #end
+
+                    #if n_sd==0.
+                    #     n_sd = 5.
+                    #end
+                    num_intₐ, errₐ = quadgk(fₐ, maximum([Q̄[1] - n_sd*Q̄_std[1],eps()]), Q̄[1] + n_sd*Q̄_std[1])
+                    num_intᵢ, errᵢ = quadgk(fᵢ, maximum([Q̄[2] - n_sd*Q̄_std[2],eps()]), Q̄[2] + n_sd*Q̄_std[2])
+                    num_intₒ, errₒ = quadgk(fₒ, maximum([Q̄[3] - n_sd*Q̄_std[3],eps()]), Q̄[3] + n_sd*Q̄_std[3])
 
                     num_int_total = log(num_intₐ) + log(num_intᵢ) + log(num_intₒ)
                     prob_g0_Qmc = log( 1 - normcdf( -Q̄[1] / Q̄_std[1] )) +
@@ -1868,7 +1973,7 @@ function get_mc_posterior_quadrature(θ,mcs,ps)
           while (trig==0)&(ccnt<=20)
                init_vec = init_vec .* 2.0
                neg_log_posterior = obj_fn_lpost(init_vec)
-               if ~(isnan(neg_log_posterior)|isinf(neg_log_posterior))
+               if !(isnan(neg_log_posterior)|isinf(neg_log_posterior))
                     trig = 1
                else
                     ccnt = ccnt + 1
@@ -1887,9 +1992,8 @@ function get_mc_posterior_quadrature(θ,mcs,ps)
           end
           obj_fn_lpost_2(meas) = obj_fn_ll_2(meas)[1] - obj_fn_lp_2(meas)
 
-     
           obj_fn_uc(in_vec) = obj_fn_lpost_2(exp(in_vec[1]))
-          
+
           res = optimize(obj_fn_uc,[log(init_vec[j])])
           
           θ̂ = exp(Optim.minimizer(res)[1])
@@ -1912,6 +2016,205 @@ function get_mc_posterior_quadrature(θ,mcs,ps)
 
 
 
+function  cond_moms_ms_var(α,Φ,λ,Π)
+
+     K = size(Π,1)
+     n = maximum(size(α[1]))
+
+     #Get backwards transition probs
+     M = Array{Float64}(undef, K, K)
+
+     q = get_ergodic_markov_dist(Π)
+     for i in 1:K
+          for j in 1:K
+               M[j,i] = Π[i,j] * (q[i]/q[j])
+          end
+     end
+     M = M ./ sum(M,dims=2)
+     
+     #Precomputation
+     kronMI = kron(M,Matrix{Float64}(I,n,n))
+
+
+     #Construct diagonal matrices
+     diagAlpha = spzeros(n*K,K)
+     for i in 1:K
+          diagAlpha[1+(i-1)*n:n*i,i] = α[i]
+     end
+    
+     diagPhi = spzeros(n*K,n*K)
+     for i in 1:K
+          diagPhi[1+(i-1)*n:n*i,1+(i-1)*n:n*i] = Φ[i]
+     end
+    
+     diagLambda = spzeros(n*K,n*K)
+     for i in 1:K
+          diagLambda[1+(i-1)*n:n*i,1+(i-1)*n:n*i] = λ[i]
+     end
+    
+     # Get J's
+     J_cell = Array{Array{Float64}}(undef,K) #cell(K,1)
+     for i in 1:K
+          J_cell[i] = zeros(n,n*K)
+          J_cell[i][:,1+(i-1)*n:i*n] = I
+     end
+    
+     #Get J
+     J = spzeros(n,n*K)
+     for i in 1:K
+          J += J_cell[i] 
+     end
+    
+     #Get es
+     e_cell = Array{Array{Float64}}(undef,K) #cell(K,1)
+     for i in 1:K
+          e_cell[i] = zeros(K,1)
+          e_cell[i][i] = 1.0
+     end
+    
+     #Get A0
+     tmp_diags = kronMI * 
+                    (diagAlpha*diagAlpha' + diagLambda*diagLambda')*J'
+     A0 = zeros(n*K)
+     for i in 1:K
+          A0[1+(i-1)*n:i*n,1+(i-1)*n:i*n] = tmp_diags[1+(i-1)*n:i*n,:]
+     end
+    
+     #Get H
+     H = spzeros(n*n*K*K,n*n*K)
+     for i in 1:K
+          H += kron(J_cell[i]',(J_cell[i]'*J_cell[i]))
+     end
+    
+     #Get A
+     A0Jp = A0*J'
+     vecA = H* ( (I - (kron(J*diagPhi,kronMI*diagPhi)*H))\A0Jp[:] )
+          
+     A = reshape(vecA,n*K,n*K)
+    
+     #Get B01
+     B01 = zeros(n*K,K)
+     tmp_diags = kronMI*diagAlpha*ones(K,1)
+     for ii=1:K
+          B01[1+(ii-1)*n:ii*n,ii] = tmp_diags[1+(ii-1)*n:ii*n]
+     end
+    
+     #Get B0
+     B0 = zeros(n*K,K)
+     tmp_diags = (I-kronMI*diagPhi)\B01*ones(K,1)
+     for i in 1:K
+          B0[1+(i-1)*n:i*n,i] = tmp_diags[1+(i-1)*n:i*n]
+     end
+    
+     #Get B
+     tmp = kronMI * diagPhi * B0 * diagAlpha' * J'
+     vecB = (H / (I-(kron(J*diagPhi,kronMI*diagPhi)*H)) )*tmp[:]
+     B = reshape(vecB,n*K,n*K)
+    
+    
+     #Get Gamma
+     Gamma_cell = Array{Array{Float64}}(undef, K)
+     for i in 1:K
+          Gamma_cell[i] = Φ[i]*J_cell[i]*B0*e_cell[i]*α[i]' + 
+                          Φ[i]*J_cell[i]*B*J_cell[i]'*Φ[i]'
+     end
+    
+     #First Moment
+     m1_cell = Array{Array{Float64}}(undef, K)
+     for i in 1:K
+          m1_cell[i] = α[i] + Φ[i]*J_cell[i] * 
+               ((I-kronMI*diagPhi)\(kronMI *
+                diagAlpha*ones(K,1)))
+     end
+    
+     #Second Moment
+     m2_cell = Array{Array{Float64}}(undef, K)
+     for i in 1:K
+          m2_cell[i] = α[i]*α[i]' + λ[i]*λ[i]' + Φ[i]*J_cell[i]*A*J_cell[i]'*Φ[ii]' +
+               Gamma_cell[i] + Gamma_cell[i]'
+     end
+
+     return m1_cell, m2_cell
+
+end
+
+function get_ergodic_markov_dist(Π)
+
+     mc = MarkovChain(Π)
+     q = stationary_distributions(mc)[1]
+
+     return q
+end
+
+function get_lim_η(Φ_Q,μ_Q,δ,c,uM1,uVar,cM1_cell,cM2_cell,Π)
+
+     ## Precompute stuff
+     q = get_ergodic_markov_dist(Π)
+     PiU = repeat(q',S,1) 
+     S = size(Pi,1)
+     n = size(mu_Q[1],1)
+     mm = n*S
+
+     g = (x) -> (x-1)%(n)+1
+     f = (x) -> floor((x-1)/n)+1
+
+     #Construct M
+     M = Array{Float64}(undef, S, mm) #NaN(S,mm)
+     for s in 1:S
+          for m in 1:mm
+               M[s,m] = ((Π[s,f(m)] - PiU[s,f(m)]).*μ_Q[f(m)])[g(m)]
+          end
+     end
+
+     #Construct delta
+     Δ = Array{Float64}(undef, mm) #NaN(mm,1)
+     for m in 1:mm
+          Δ[m] = δ[g(m)] 
+     end
+
+     #Contruct K
+     K = Array{Float64}(undef, mm, mm)#NaN(mm)
+     for m in 1:mm
+          for mp in 1:mm
+               K[m,mp] = Π[f(m),f(mp)] .* Φ_Q[f(mp)][g(mp),g(m)] 
+          end
+     end
+
+     #Construct X
+     X = Array{Float64}(undef, mm) 
+     for m in 1:mm
+          X[m] = cM1_cell[f(m)][g(m)]*q[f(m)]
+     end
+
+     #Construct Omega
+     Ω = Array{Float64}(undef, mm, mm)
+     for m in 1:mm
+          for mp in 1:mm
+               Ω[m,mp] = q[f(m)]*q[f(mp)]*cM2_cell[f(mp)][g(m),g(mp)]
+          end
+     end
+
+     ## Compute limit of first moment
+     lim_m1 = δ'*uM1 + c
+
+     ## Compute limit of variance
+     lim_var = δ'*uVar*δ
+
+     ## Compute limit of sum of covariance terms
+     lim_A = Δ' * 
+          kron( (((I-Pi-PiU)\M)/(I-K) - (PiU*M/(I-K))/(I-K))',ones(size(uM1,1),1)') *
+          Diagonal(X) * Δ 
+
+     lim_cov = lim_A + Δ' * Ω * ((I-K) \ Δ) - (Δ' * X) * (X' * ((I-K) \ Δ))
+
+
+     ## Put it all together
+     out = lim_m1 + lim_cov - 0.5*lim_var
+
+     return out, lim_m1, lim_var, lim_cov
+end
+
+
 export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks, 
      simulate_msvar_cond_regime_path_shock, construct_gamma_macro_array, construct_m0_macro_array, 
      construct_b1_macro_array, construct_bm1_macro_array, construct_b0_macro_array, 
@@ -1922,7 +2225,7 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      simulate_model_prices_cond_shock_acc_ts,construct_prior_default, construct_Q_mats,
      mc_loglik_numint_1d, construct_mc_struct, get_mc_posterior_quadrature, process_data,
      is_feasible, make_model_predictions, compute_model_neg_log_lik, construct_prior_struct,
-     get_prior_distributions, generate_draw_prior_fn,  generate_eval_logprior
+     get_prior_distributions, generate_draw_prior_fn,  generate_eval_logprior, fmmsre
 
 
 end
