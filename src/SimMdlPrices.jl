@@ -1443,6 +1443,9 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      Σ_m = (100.0^2) .* reshape(convert(Array, VectorOfArray(cov)), (3,12))
      for s ∈ 1:S
           cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
+          if !isposdef(cov_m)
+               cov_m = LowerTriangular(cov_m) + LowerTriangular(cov_m)'
+          end
           macro_ll_cons[s] = logSrpMacrofac - sum(log.(diag(cholesky(cov_m).U)))
      end
      σ_y² = (100.0^2) .* (σ_y^2)*Matrix(I,n_yields, n_yields)
@@ -1486,11 +1489,19 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
                     #if n_sd==0.
                     #     n_sd = 5.
                     #end
-                    num_intₐ, errₐ = quadgk(fₐ, maximum([Q̄[1] - n_sd*Q̄_std[1],eps()]), Q̄[1] + n_sd*Q̄_std[1])
-                    num_intᵢ, errᵢ = quadgk(fᵢ, maximum([Q̄[2] - n_sd*Q̄_std[2],eps()]), Q̄[2] + n_sd*Q̄_std[2])
-                    num_intₒ, errₒ = quadgk(fₒ, maximum([Q̄[3] - n_sd*Q̄_std[3],eps()]), Q̄[3] + n_sd*Q̄_std[3])
+                    num_intₐ = 0.0
+                    num_intᵢ = 0.0
+                    num_intₒ = 0.0
+                    num_int_total = 0.0
+                    try
+                         num_intₐ, errₐ = quadgk(fₐ, maximum([Q̄[1] - n_sd*Q̄_std[1],eps()]), Q̄[1] + n_sd*Q̄_std[1])
+                         num_intᵢ, errᵢ = quadgk(fᵢ, maximum([Q̄[2] - n_sd*Q̄_std[2],eps()]), Q̄[2] + n_sd*Q̄_std[2])
+                         num_intₒ, errₒ = quadgk(fₒ, maximum([Q̄[3] - n_sd*Q̄_std[3],eps()]), Q̄[3] + n_sd*Q̄_std[3])
+                         num_int_total = log(num_intₐ) + log(num_intᵢ) + log(num_intₒ)
 
-                    num_int_total = log(num_intₐ) + log(num_intᵢ) + log(num_intₒ)
+                    catch
+                         @infiltrate
+                    end
                     prob_g0_Qmc = log( 1 - normcdf( -Q̄[1] / Q̄_std[1] )) +
                          log( 1 - normcdf( -Q̄[2] / Q̄_std[3] )) +
                          log( 1 - normcdf( -Q̄[2] / Q̄_std[3] ))
