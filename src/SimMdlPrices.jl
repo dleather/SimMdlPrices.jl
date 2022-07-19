@@ -18,6 +18,8 @@ using ForwardDiff
 using Optim
 using StatsBase
 using FillArrays
+using Random
+using Infiltrator
 
 function simulate_ms_var_1_cond_shocks(x0,s0,μ,Φ,Σ,Π,u,ϵ)
      
@@ -28,6 +30,13 @@ function simulate_ms_var_1_cond_shocks(x0,s0,μ,Φ,Σ,Π,u,ϵ)
      return (x_mat, s_mat)
 end
 
+function simulate_ms_var_1_cond_shocks!(x_mat,s_mat,x0,s0,μ,Φ,Σ,Π,u,ϵ)
+
+     simulate_markov_switch_init_cond_shock!(s_mat,s0,Π,u)
+     simulate_msvar_cond_regime_path_shock!(x_mat,x0,s_mat,μ,Φ,Σ,ϵ)
+
+end
+
 function simulate_markov_switch_init_cond_shock(s0,Π,u)
      
      
@@ -35,12 +44,22 @@ function simulate_markov_switch_init_cond_shock(s0,Π,u)
      S = size(Π)[1]
 
      #Preallocate
-     s_mat = fill(0,T+1,G)
-     #s_mat = Array{Int64}(undef,T+1,G)
+     #s_mat = fill(0,T+1,G)
+     s_mat = Array{Int64}(undef,T+1,G)
      s_mat[1,:] .= s0
 
+     #Π₀ = cumsum(Π, dims = 2) #REMOVED FOR TYPE-INSTABILITY
+     
      #Propogate
-     Π₀ = cumsum(Π, dims = 2)
+     
+     Π₀ = Matrix{Float64}(undef,S,S)
+     Π₀[:,1] = Π[:,1]
+     @inbounds for s1 = 1:S
+          @inbounds for s2=2:S
+               Π₀[s1,s2] = Π[s1,s2] + Π₀[s1,s2-1]
+          end
+     end
+     
      @inbounds for g ∈ 1:G
           @inbounds for t ∈ 1:T
                @inbounds for s ∈ 1:S
@@ -51,8 +70,43 @@ function simulate_markov_switch_init_cond_shock(s0,Π,u)
                end
           end
      end
-
      return s_mat
+     
+end
+
+
+function simulate_markov_switch_init_cond_shock!(s_mat,s0,Π,u)
+     
+     
+     T,G = size(u)
+     S = size(Π)[1]
+
+     #Preallocate
+     s_mat[1,:] .= s0
+   
+
+     #Π₀ = cumsum(Π, dims = 2) #REMOVED FOR TYPE-INSTABILITY
+     
+     #Propogate
+     
+     Π₀ = Matrix{Float64}(undef,S,S)
+     Π₀[:,1] = Π[:,1]
+     @inbounds for s1 = 1:S
+          @inbounds for s2=2:S
+               Π₀[s1,s2] = Π[s1,s2] + Π₀[s1,s2-1]
+          end
+     end
+     
+     @inbounds for g ∈ 1:G
+          @inbounds for t ∈ 1:T
+               @inbounds for s ∈ 1:S
+                    if u[t, g] <= Π₀[s_mat[t, g], s]
+                         s_mat[t+1, g] = s
+                         break
+                    end
+               end
+          end
+     end
      
 end
 
@@ -90,6 +144,40 @@ function simulate_msvar_cond_regime_path_shock(x0,s_mat,μ,Φ,Σ,ϵ)
      end
 
      return x_mat
+     
+end
+
+
+function simulate_msvar_cond_regime_path_shock!(x_mat,x0_in,s_mat,μ,Φ,Σ,ϵ)
+
+     #Unload and Preallocate
+     N, N2 = size(x0_in)
+     T = size(s_mat)[1] - 1
+     G = size(s_mat)[2]
+     #@assert G == size(ϵ)[3]
+     #@assert T == size(ϵ)[2]
+     #@assert N == size(ϵ)[1]
+     
+
+     if N2==1
+          x0 = repeat(x0_in, 1, G)
+     else
+          x0 = x0_in
+     end
+
+     #Propogate
+     @inbounds for g ∈ 1:G
+
+          x_mat[:, 1, g] = @view(x0[:, g])
+          @inbounds for t ∈ 1:T
+
+               s = s_mat[t+1, g]
+               x_mat[:, t+1, g] = μ[s] .+ Φ[s] *  @view(x_mat[:,t,g])  .+ 
+                                  Σ[s] * @view(ϵ[:, t, g])
+
+          end
+
+     end
      
 end
 
@@ -783,6 +871,37 @@ function simulate_nu_cond_x_i_shock_rn(x_mat,init_ν,mrfp,w,z)
      return ν_mat
 end
 
+function simulate_nu_cond_x_i_shock_rn!(ν_mat,x_mat,init_ν,mrfp,w,z)
+
+     N = size(x_mat)[1]
+     n_ts = size(w)[2]
+     G = size(w)[3]
+     N_re, N2 = size(init_ν)
+     @unpack σ_w, σ_z, Δ_Q = mrfp
+
+     if N2==1
+          init_ν = repeat(init_ν,1,G)
+     end
+               
+      @inbounds for g=1:G
+
+          ν_mat[:,1,g] = @view(init_ν[:, g])
+          ##Compute nu_t iteratively 
+          @inbounds for i=1:n_ts
+               #X_mat[N+1:N+N_re, i+1] = Δ_Q * @view(X_mat[:, i]) + @view(wz_path[: ,i])
+               @inbounds for j=1:N_re
+                    ν_mat[j,i+1,g] = Δ_Q[j,1]*x_mat[1,i+1,g] + Δ_Q[j,2]*x_mat[2,i+1,g] +
+                                   Δ_Q[j,N+j]*ν_mat[j,i,g] + Δ_Q[j,N+N_re+1] + 
+                                   σ_w[j]*w[j,i,g] + σ_z[j]*z[i,g]
+               end
+               
+          end
+     
+     end
+
+end
+
+#=
 function compute_mc_real_estate_Q_cond_x_i_nofull(x_mat, ν_mat)
      T = size(x_mat)[2] - 1
      n_η = T
@@ -834,6 +953,116 @@ function compute_mc_real_estate_Q_cond_x_i_nofull(x_mat, ν_mat)
      
      return Q_mc, η_mc, Q_std_mc, Q_std_prep
 
+end
+=#
+
+function compute_mc_real_estate_Q_cond_x_i_nofull(x_mat, ν_mat)
+     T = size(x_mat)[2] - 1
+     n_η = T
+     G = size(x_mat)[3]
+     N_re = size(ν_mat)[1]
+     #T_ν = size(ν_mat)[2] - 1
+
+     ## Preallocate
+     Δ_ν = [0. 0. -1. 1. 0. 0.;
+                                   0. 0. -1. 0. 1. 0.;
+                                   0. 0. -1. 0. 0. 1.]
+
+     η_sim = Array{Float64}(undef, N_re, T, G)
+     m1_η_sim = Array{Float64}(undef, N_re, T, G)
+     #m2_η_sim = Array{Float64}(undef, N_re, T, G)
+     #x_path_mat = [x_mat; ν_mat]
+
+     #=
+     @inbounds for g=1:G
+          x_path = @view(x_path_mat[:,1:T,g])
+          m1_η_sim[:, :, g] = cumsum(Δ_ν * x_path, dims = 2)
+          #m2_η_sim[:, :, g] = @view(m1_η_sim[:, :, g]).^2
+          #η_sim[:, :, g] = exp.(@view(m1_η_sim[:, :, g]))
+     end@inbounds 
+     =#
+
+     @inbounds for g=1:G
+          @inbounds for t=1:T
+               @inbounds for j=1:N_re
+                    if t==1
+                         m1_η_sim[j, t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] 
+                    else
+                         m1_η_sim[j, t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] +
+                                              m1_η_sim[j, t-1, g]
+                    end
+                    η_sim[j,t,g] = exp(m1_η_sim[j,t,g])
+               end
+          end
+     end
+     #m2_η_sim = m1_η_sim .^ 2
+     #η_sim = exp.(m1_η_sim)
+
+     η_mc = dropdims(mean(η_sim, dims = 3), dims = 3)
+     #m1_η_mc = dropdims(mean(m1_η_sim, dims = 3), dims = 3)'
+     #m2_η_mc = dropdims(mean(m2_η_sim, dims = 3), dims = 3)'
+     Q_mc = sum(η_mc[:,1:n_η], dims = 2)
+     #log_Q_mc = mean(log.(dropdims(sum(η_sim, dims = 2), dims = 2)), dims = 2)
+     
+     #Get std mat
+     N_std = Int64(floor(G / 30))
+     Q_std_prep = Array{Float64}(undef, N_re, 30)
+     #log_Q_std_prep = Array{Float64}(undef, N_re, 30)
+
+     η_std_prep = Array{Float64}(undef, N_re, T, 30)
+     @inbounds for i=1:30
+          η_std_prep[:, :, i] =  dropdims(mean(@view(η_sim[:, :, 1+(i-1)*N_std:i*N_std]), dims = 3), dims = 3)
+          Q_std_prep[:, i] = sum(@view(η_std_prep[:, 1:n_η, i]), dims = 2)
+          #log_Q_std_prep[:, i] = mean(log.(dropdims(sum(@view(η_sim[:, :, 1+(i-1)*N_std:i*N_std]), dims = 2), dims = 2)),
+          #                                               dims = 2)
+     end
+
+     #η_std_mc = dropdims(std(η_std_prep, dims = 3), dims = 3) ./ sqrt(30)
+     Q_std_mc = std(Q_std_prep, dims = 2) ./ sqrt(30)
+     #log_Q_std_mc = std(log_Q_std_prep, dims = 2) ./ sqrt(30)
+     
+     return Q_mc, η_mc, Q_std_mc, Q_std_prep
+
+end
+
+function compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc, η_mc, Q_std_mc, Q_std_prep, x_mat,
+          ν_mat, η_sim, m1_η_sim, η_std_prep)
+     
+     T = size(x_mat)[2] - 1
+     n_η = T
+     G = size(x_mat)[3]
+     N_re = size(ν_mat)[1]
+
+
+     @inbounds for g=1:G
+          @inbounds for t=1:T
+               @inbounds for j=1:N_re
+                    if t==1
+                         m1_η_sim[j, t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] 
+                    else
+                         m1_η_sim[j, t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] +
+                                              m1_η_sim[j, t-1, g]
+                    end
+                    η_sim[j,t,g] = exp(m1_η_sim[j,t,g])
+               end
+          end
+     end
+
+     η_mc .= dropdims(mean(η_sim, dims = 3), dims = 3)
+     Q_mc .= sum(@view(η_mc[:,1:n_η]), dims = 2)
+     
+     #Get std mat
+     N_std = Int64(floor(G / 30))
+
+     @inbounds for i=1:30
+          η_std_prep[:, :, i] =  dropdims(mean(@view(η_sim[:, :, 1+(i-1)*N_std:i*N_std]), dims = 3), dims = 3)
+          Q_std_prep[:, i] = sum(@view(η_std_prep[:, 1:n_η, i]), dims = 2)
+     end
+
+     Q_std_mc .= std(Q_std_prep, dims = 2) / sqrt(30)
+
+     return 
+     
 end
 
 function compute_mc_term_structure_cond_x(x_mat, maturity_mat)
@@ -954,8 +1183,7 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
 
      T_bar = 0
 
-     @inbounds while ((trig==0) && (l<=L)) #early simulation check
-
+     while ((trig==0) && (l<=L)) #early simulation check
           if l==1
 
                #Detect early truncation point, T_bar
@@ -969,26 +1197,25 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
                local Q_mc_tmp
                local Q_std_mc_tmp
                local Q_std_prep 
-               @inbounds while (trig_2==0)&&(cnt_2<=n_grps)
+               while (trig_2==0)&&(cnt_2<=n_grps)
 
                     tmp_ndx = (1+(cnt_2-1)*T_tmp):(cnt_2*T_tmp)
 
-                    #@timeit tmr "inner_sim_msvar" begin
-                         #Simulate model for length T_tmp
-                         #tmp_x_mat, tmp_s_mat = simulate_ms_var_1_cond_shocks(x_mat[:, tmp_ndx[1], :],
-                         #     s_mat[tmp_ndx[1], :], μ_Q, Φ_Q, Σ, Π, u_cell[l][tmp_ndx, :], ϵ_cell[l][: ,tmp_ndx, :])
-                         tmp_x_mat, tmp_s_mat = simulate_ms_var_1_cond_shocks(x_mat[:, tmp_ndx[1], :],
-                             s_mat[tmp_ndx[1], :], μ_Q, Φ_Q, Σ, Π, u[tmp_ndx, 1+(l-1)*gg:l*gg],
-                             ϵ[: ,tmp_ndx, 1+(l-1)*gg:l*gg])
-                    #end
-                   # 
-                    #@timeit tmr "inner_sim_nu" begin
-                         #Simulate \nu
-                         #tmp_nu_mat = simulate_nu_cond_x_i_shock_rn(tmp_x_mat, ν_mat[:, tmp_ndx[1], :],
-                         #     mrfp, w_cell[l][:, tmp_ndx, :], z_cell[l][tmp_ndx, :])
-                         tmp_nu_mat = simulate_nu_cond_x_i_shock_rn(tmp_x_mat, ν_mat[:, tmp_ndx[1], :],
-                              mrfp, @view(w[:, tmp_ndx, 1+(l-1)*gg:l*gg]), @view(z[tmp_ndx, 1+(l-1)*gg:l*gg]))
-                   #end
+                    #Simulate model for length T_tmp
+                    x_mat_in = @view x_mat[:, tmp_ndx[1], :]
+                    s_mat_in = @view s_mat[tmp_ndx[1], :]
+                    u_mat_in = @view u[tmp_ndx, 1+(l-1)*gg:l*gg]
+                    ϵ_in = @view ϵ[: ,tmp_ndx, 1+(l-1)*gg:l*gg]
+                    tmp_x_mat, tmp_s_mat = simulate_ms_var_1_cond_shocks(x_mat_in,s_mat_in,
+                         μ_Q, Φ_Q, Σ, Π, u_mat_in,ϵ_in)
+
+                    
+                    #Simulate \nu
+                    v_mat_in = @view(ν_mat[:, tmp_ndx[1], :])
+                    w_mat_in = @view(w[:, tmp_ndx, 1+(l-1)*gg:l*gg])
+                    z_mat_in = @view(z[tmp_ndx, 1+(l-1)*gg:l*gg])
+                    tmp_nu_mat = simulate_nu_cond_x_i_shock_rn(tmp_x_mat, v_mat_in, mrfp, 
+                                                               w_mat_in, z_mat_in)
 
                     #Store simulations thus far
                     x_mat[:, tmp_ndx[1]+1:tmp_ndx[end]+1, :] = tmp_x_mat[:, 2:end, :]
@@ -997,9 +1224,9 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
 
                     #@timeit tmr "compute_Q" begin
                          #Simulate Q
-                         Q_mc_tmp, η_mc_tmp, Q_std_mc_tmp, Q_std_prep = 
-                              compute_mc_real_estate_Q_cond_x_i_nofull(@view(x_mat[:, 1:tmp_ndx[end]+1, :]),
-                                                                                                    @view(ν_mat[:, 1:tmp_ndx[end]+1, :]))
+                    Q_mc_tmp, η_mc_tmp, Q_std_mc_tmp, Q_std_prep = 
+                         compute_mc_real_estate_Q_cond_x_i_nofull(x_mat[:, 1:tmp_ndx[end]+1, :],
+                              ν_mat[:, 1:tmp_ndx[end]+1, :])
                    # end
                     #Check that all η_{T_sim,x_t)< cutoff for all t
                     if (~any(η_mc_tmp[:, end] .>= η_tol)) || (cnt_2==n_grps)
@@ -1026,15 +1253,22 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
                #@timeit tmr "outer_sim_msvar" begin
                     #x_mat, s_mat = simulate_ms_var_1_cond_shocks(X, s, μ_Q, Φ_Q, Σ,Π,u_cell[l][1:T_bar, :],
                     #                                                                                     ϵ_cell[l][:, 1:T_bar, :])
-                    x_mat, s_mat = simulate_ms_var_1_cond_shocks(X, s, μ_Q, Φ_Q, Σ,Π,@view(u[1:T_bar, 1+(l-1)*gg:l*gg]),
-                                                                                                         @view(ϵ[:, 1:T_bar, 1+(l-1)*gg:l*gg]))
+                    #u_in = @view(u[1:T_bar, 1+(l-1)*gg:l*gg])
+                    #ϵ_in = @view(ϵ[:, 1:T_bar, 1+(l-1)*gg:l*gg])
+                    u_in = u[1:T_bar, 1+(l-1)*gg:l*gg]
+                    ϵ_in = ϵ[:, 1:T_bar, 1+(l-1)*gg:l*gg]
+                    x_mat, s_mat = simulate_ms_var_1_cond_shocks(X, s, μ_Q, Φ_Q, Σ,Π,u_in, 
+                                                                 ϵ_in)
                #end
 
                #@timeit tmr "outer_sim_nu" begin
                #Simulate \nu
                #ν_mat = simulate_nu_cond_x_i_shock_rn(x_mat, ν, mrfp ,w_cell[l][:, 1:T_bar, :], z_cell[l][1:T_bar, :])
-               ν_mat = simulate_nu_cond_x_i_shock_rn(x_mat, ν, mrfp ,@view(w[:, 1:T_bar,  1+(l-1)*gg:l*gg]), 
-                                                                                    @view(z[1:T_bar,  1+(l-1)*gg:l*gg]))
+               #w_in = @view(w[:, 1:T_bar,  1+(l-1)*gg:l*gg])
+               #z_in = @view(z[1:T_bar,  1+(l-1)*gg:l*gg])
+               w_in = w[:, 1:T_bar,  1+(l-1)*gg:l*gg]
+               z_in = z[1:T_bar,  1+(l-1)*gg:l*gg]
+               ν_mat = simulate_nu_cond_x_i_shock_rn(x_mat, ν, mrfp , w_in, z_in)
 
                #end
 
@@ -1082,6 +1316,164 @@ function simulate_model_prices_cond_shock_acc_ts(x_init, ν_init, mrfp, T_sim, u
 
      #println(tmr)
      return Q_mc, η_mc, Q_std_mc, T_bar 
+
+end
+
+
+function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, u, ϵ, w, z, 
+     tol, del, η_tol, t, s, n_grps, L,x_mat, ν_mat, s_mat, Q_mc, η_mc, Q_std_mc, Q_std_prep,
+     Q_mc_cell, η_mc_cell, Q_std_mc_cell, Q_std_prep_cell, η_sim, m1_η_sim,η_std_prep)
+
+
+     #tmr = TimerOutput()
+     # Unload inputs
+     N_macro = 3
+     N_re = 3
+     M = size(u)[1]
+     G = size(ϵ)[3]
+     #@assert floor(G / L)== (G/L)
+     gg = Int64(G / L)
+
+     @unpack μ_Q, Φ_Q, Σ, Π = mrfp
+
+     #Q_mc = Array{Float64}(undef, N_re, 1)
+     #Q_std_mc = Array{Float64}(undef, N_re, 1)
+     #η_mc= Array{Float64}(undef, N_re, M, 1)
+
+     X = Array(Array(x_init[:, t]')')
+     ν = Array(Array(ν_init[:, t]')')
+     trig = 0
+     l = 1
+
+     #Q_mc_cell = Vector{Array{Float64,2}}(undef, L)
+     #Q_std_mc_cell = Vector{Array{Float64,2}}(undef, L)
+     #η_mc_cell = Vector{Array{Float64,2}}(undef, L)
+     #Q_std_prep_cell = Vector{Array{Float64,2}}(undef, L)
+     #x_mat = Array{Float64}(undef, N_macro, T_sim+1, gg)
+     #s_mat = Array{Int64}(undef, T_sim+1, gg)
+     #ν_mat = Array{Float64}(undef, N_re, T_sim+1, gg)
+
+     T_bar = 0
+
+    
+
+     @inbounds while ((trig==0) && (l<=L)) #early simulation check
+          if l==1
+
+               #Detect early truncation point, T_bar
+               trig_2 = 0
+               cnt_2 = 1
+               T_tmp = Int64(T_sim ./ n_grps)
+               x_mat[:, 1, 1+(l-1)*gg:l*gg] = repeat(X, 1, 1, gg)
+               ν_mat[:, 1, 1+(l-1)*gg:l*gg] = repeat(ν, 1, 1, gg)
+               s_mat[1, 1+(l-1)*gg:l*gg] .= s
+
+               @inbounds while (trig_2==0)&&(cnt_2<=n_grps)
+
+                    tmp_ndx = (1+(cnt_2-1)*T_tmp):(cnt_2*T_tmp)
+
+                    #Simulate model for length T_tmp
+                    x0 = @view x_mat[:, tmp_ndx[1], 1+(l-1)*gg:l*gg]
+                    s0 = s_mat[tmp_ndx[1],1+(l-1)*gg:l*gg]
+                    u_in = @view u[tmp_ndx, 1+(l-1)*gg:l*gg]
+                    ϵ_in = @view ϵ[: ,tmp_ndx, 1+(l-1)*gg:l*gg]
+                    ν0 = @view(ν_mat[:, tmp_ndx[1], 1+(l-1)*gg:l*gg])
+                    w_mat_in = @view(w[:, tmp_ndx, 1+(l-1)*gg:l*gg])
+                    z_mat_in = @view(z[tmp_ndx, 1+(l-1)*gg:l*gg])
+                    x_mat_in = @view(x_mat[:, tmp_ndx[1]:tmp_ndx[end]+1, 1+(l-1)*gg:l*gg])
+                    ν_mat_in = @view(ν_mat[:, tmp_ndx[1]:tmp_ndx[end]+1, 1+(l-1)*gg:l*gg])
+                    s_mat_in = @view(s_mat[tmp_ndx[1]:tmp_ndx[end]+1, 1+(l-1)*gg:l*gg])
+                    Q_mc_in = @view(Q_mc_cell[l][:,1])
+                    η_mc_in = @view(η_mc_cell[l][:,:])
+                    Q_std_mc_in = @view(Q_std_mc_cell[l][:,1])
+                    Q_std_prep_in = @view(Q_std_prep_cell[l][:,:])
+
+
+                    simulate_Q_acc_ts!(ν_mat_in,x_mat_in,s_mat_in,x0,s0,ν0,u_in,ϵ_in,
+                                       mrfp,w_mat_in,z_mat_in,Q_mc_in,η_mc_in,Q_std_mc_in,
+                                       Q_std_prep_in,η_sim,m1_η_sim,η_std_prep)
+
+
+                    
+                    #Check that all η_{T_sim,x_t)< cutoff for all t
+                    if (~any(η_mc_in[:, end] .>= η_tol)) || (cnt_2==n_grps)
+
+                         #Set loop trigger and T_bar
+                         T_bar = cnt_2*T_tmp
+                         trig_2 = 1
+
+                    else
+
+                         cnt_2 +=  1
+
+                    end
+               end
+
+          else
+               #Run simulation for T_bar periods
+               # Simulate Macro model
+               x_mat[:, 1, 1+(l-1)*gg:l*gg] = repeat(X, 1, 1, gg)
+               ν_mat[:, 1, 1+(l-1)*gg:l*gg] = repeat(ν, 1, 1, gg)
+               s_mat[1, 1+(l-1)*gg:l*gg] .= s
+               x0 = @view x_mat[:, 1, 1+(l-1)*gg:l*gg]
+               s0 = @view s_mat[1, 1+(l-1)*gg:l*gg]
+               u_in = @view u[1:T_bar, 1+(l-1)*gg:l*gg]
+               ϵ_in = @view ϵ[: ,1:T_bar, 1+(l-1)*gg:l*gg]
+               ν0 = @view(ν_mat[:, 1, 1+(l-1)*gg:l*gg])
+               w_mat_in = @view(w[:, 1:T_bar, 1+(l-1)*gg:l*gg])
+               z_mat_in = @view(z[1:T_bar, 1+(l-1)*gg:l*gg])
+               x_mat_in = @view(x_mat[:, 1:T_bar+1, 1+(l-1)*gg:l*gg])
+               ν_mat_in = @view(ν_mat[:, 1:T_bar+1, 1+(l-1)*gg:l*gg])
+               s_mat_in = @view(s_mat[1:T_bar+1, 1+(l-1)*gg:l*gg])
+               Q_mc_in = @view(Q_mc_cell[l][:,1])
+               η_mc_in = @view(η_mc_cell[l][:,:])
+               Q_std_mc_in = @view(Q_std_mc_cell[l][:,1])
+               Q_std_prep_in = @view(Q_std_prep_cell[l][:,:])
+
+               #Given simulation-approximate term-structure
+               simulate_Q_acc_ts!(ν_mat_in,x_mat_in,s_mat_in,x0,s0,ν0,u_in,ϵ_in,
+                                   mrfp,w_mat_in,z_mat_in,Q_mc_in,η_mc_in,Q_std_mc_in,
+                                   Q_std_prep_in,η_sim,m1_η_sim,η_std_prep)
+          end
+
+
+          #Compute total mean and variance
+
+          Q_mc_tot, η_mc_tot, Q_std_mc_tot =
+               get_total_mean_and_std(@view(Q_mc_cell[1:l]),@view(η_mc_cell[1:l]),@view(Q_std_prep_cell[1:l]))
+
+          #Check condition
+          if (!any((2 .* (1. .- normcdf.((1.2 .* tol .* Q_mc_tot) ./ Q_std_mc_tot)) .> del)) || (l==L) )
+
+               trig = 1;
+               #println("l: $l")
+               #println("T_bar: $T_bar")
+
+               #If yes, store results
+               Q_mc[:, 1] = Q_mc_tot
+               η_mc[:, 1:T_bar] = η_mc_tot[:,1:T_bar]
+               Q_std_mc[:, 1] = Q_std_mc_tot
+
+          else
+
+               l = l+1;
+
+          end
+
+     end
+
+end
+
+function simulate_Q_acc_ts!(ν_mat,x_mat,s_mat,x0,s0,ν0,u,ϵ,mrfp,w,z,Q_mc,η_mc,Q_std_mc,Q_std_prep,
+                            η_sim,m1_η_sim,η_std_prep)
+
+     @unpack μ_Q,Φ_Q,Σ,Π = mrfp     
+     simulate_ms_var_1_cond_shocks!(x_mat,s_mat,x0,s0,μ_Q, Φ_Q, Σ, Π, u,ϵ)
+     simulate_nu_cond_x_i_shock_rn!(ν_mat,x_mat, ν0, mrfp,w, z)
+     compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc,η_mc,Q_std_mc,Q_std_prep,x_mat,ν_mat,
+                                               η_sim, m1_η_sim, η_std_prep)
+
+
 
 end
 
@@ -1650,15 +2042,17 @@ end
 
 function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      
+     sf = 100. #scale factor
+
      #Unload structures
      @unpack Y0_macro, Y0_ν, Y0_ts, Y0_q, T, n_macro, n_yields, n_re = data_struct
      @unpack Y0_hat_macro, Y0_hat_ν, Y0_hat_ts, Y0_hat_q, Y0_hat_q_std = pred_struct
      @unpack S, Π, σ_y, cov, q = rf_struct
 
      #Compute Residuals: Y0 - Y0_hat
-     ϵ_m = 100. .* ( repeat(Y0_macro, 1, S) - Y0_hat_macro)
-     ϵ_ν = 100. .* (repeat(Y0_ν - Y0_hat_ν, 1, S))
-     ϵ_y = 100. .* (repeat(Y0_ts, 1, S) - Y0_hat_ts)
+     ϵ_m = sf .* ( repeat(Y0_macro, 1, S) - Y0_hat_macro)
+     ϵ_ν = sf .* (repeat(Y0_ν - Y0_hat_ν, 1, S))
+     ϵ_y = sf .* (repeat(Y0_ts, 1, S) - Y0_hat_ts)
      #ϵ_Q = repeat(log.(Y0_q), 1, S) - log.(Y0_hat_q)
 
      Q_mat = repeat(Y0_q, 1, S)
@@ -1666,7 +2060,7 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
 
      #Precomputation
      Σ_re = construct_cov_re(rf_struct)
-     Σ_ν = (100.0^2) .* Σ_re[4:6,4:6]
+     Σ_ν = (sf^2) .* Σ_re[4:6,4:6]
      Σ_q = Σ_re[1:3,1:3]
      σ_q = sqrt.(diag(Σ_q))
      twoP = 2. * π
@@ -1681,7 +2075,7 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      ones_S = ones(1,S)
 
      macro_ll_cons = Array{Float64}(undef, S, 1)
-     Σ_m = (100.0^2) .* reshape(convert(Array, VectorOfArray(cov)), (3,12))
+     Σ_m = (sf^2) .* reshape(convert(Array, VectorOfArray(cov)), (3,12))
      for s ∈ 1:S
           cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
           if !isposdef(cov_m)
@@ -1689,7 +2083,7 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
           end
           macro_ll_cons[s] = logSrpMacrofac - sum(log.(diag(cholesky(cov_m).U)))
      end
-     σ_y² = (100.0^2) .* (σ_y^2)*Matrix(I,n_yields, n_yields)
+     σ_y² = (sf^2) .* (σ_y^2)*Matrix(I,n_yields, n_yields)
      yields_ll_cons = logSrpYieldsfac - sum(log.(diag(cholesky(σ_y²).U)))
      ν_ll_cons = logSrpNufac - sum(log.(diag(cholesky(Σ_ν).U)))
 
@@ -2542,20 +2936,90 @@ function get_lim_η(Φ_Q,μ_Q,δ,c,uM1,uVar,cM1_cell,cM2_cell,Π)
      return out, lim_m1, lim_var, lim_cov
 end
 
+function get_projection_matrix_antithetic(N)
+     TwopN = 2^N
+     projection_matrix = Array{Float64}(undef, N, TwopN)
+     for i in 1:N
+          projection_matrix[i,:] = mod.( floor.( ((1:TwopN).-1)./(2^(N-i)) ),2)
+     end
+     projection_matrix = 1 .- projection_matrix
+     
+     for i in 1:N
+          for j in 1:TwopN
+               if projection_matrix[i,j] == 0
+                   projection_matrix[i,j] = -1
+               end
+          end
+     end
 
-          
-##TODO:
-#    process_data(done)
-#    is_feasible (done)
-#    rf_mdoel to model predictions (done)
-#    construct prior
-#    compute_model_neg_log_lik (done)
-#    create_lag_matrix (done)
-#    project_macro_model (done)
-#    project_ν_cond_macro (done)
-#    approximate_model_prices (done)
-#    project_msvar (done)
+     return projection_matrix
+end
 
+
+function make_antithetic(draw_mat_in,projection_mat)
+     # Unload Inputs
+     N,T,G = size(draw_mat_in)
+     NN,M = size(projection_mat)
+     if N!=NN 
+          throw("N / NN mismatch") 
+     end
+     if N==1
+          throw("Code not developed for 1-dimensional draws")
+     end
+
+     # Make Antithetic
+     draw_mat_out = Array{Float64}(undef,N,T,G*M)
+     for i=1:M
+          draw_mat_out[:,:,1+(i-1)*G:G*i] = 
+               repeat(projection_mat[:,i],1,T,G).*draw_mat_in
+     end
+
+
+     return draw_mat_out
+end
+
+
+function draw_model_shocks_antithetic(N_sim,T_sim,N_macro,N_re,seed_num)
+     Random.seed!(seed_num)
+
+     #Draw u_mat
+     u_mat_tmp = rand(Float64, (T_sim, Int(N_sim/2)))
+     u_mat = [u_mat_tmp'; (1.0 .- u_mat_tmp)']'
+
+     #Draw ϵ_mat
+     projection_mat = get_projection_matrix_antithetic(N_macro)
+     ϵ_mat_tmp = randn(Float64, (N_macro,T_sim, Int(N_sim/(2^N_macro))))
+     ϵ_mat = make_antithetic(ϵ_mat_tmp,projection_mat)
+
+     #Draw w_mat
+     projection_mat =  get_projection_matrix_antithetic(N_re)
+     w_mat_tmp = randn(Float64, (N_re,T_sim,Int(N_sim/(2^N_re))))
+     w_mat = make_antithetic(w_mat_tmp,projection_mat)
+
+     #Draw z_mat
+     z_mat_tmp = randn(Float64, (T_sim,Int(N_sim/2)))
+     z_mat = [z_mat_tmp'; -z_mat_tmp']'
+
+     return u_mat,ϵ_mat,w_mat,z_mat
+
+end
+
+function  draw_model_shocks(N_sim,T_sim,N_macro,N_re,seed_number)
+
+     Random.seed!(seed_number)
+
+     u_mat = rand(Float64,(T_sim,N_sim))
+     
+     ϵ_mat = randn(Float64,(N_macro,T_sim,N_sim))
+     
+     w_mat = randn(Float64,(N_re,T_sim,N_sim))
+     
+     z_mat = randn(Float64,(T_sim,N_sim))
+
+     return u_mat,ϵ_mat,w_mat,z_mat
+
+end
+     
 export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks, 
      simulate_msvar_cond_regime_path_shock, construct_gamma_macro_array, construct_m0_macro_array, 
      construct_b1_macro_array, construct_bm1_macro_array, construct_b0_macro_array, 
@@ -2567,7 +3031,11 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      mc_loglik_numint_1d, construct_mc_struct, get_mc_posterior_quadrature, process_data,
      is_feasible, make_model_predictions, compute_model_neg_log_lik, construct_prior_struct,
      get_prior_distributions, generate_draw_prior_fn,  generate_eval_logprior, fmmsre, map_cap_to_macro, 
-     loglik_macro, params_to_rf_macro
+     loglik_macro, params_to_rf_macro,draw_model_shocks_antithetic, draw_model_shocks,
+     get_projection_matrix_antithetic,simulate_markov_switch_init_cond_shock!,
+     simulate_msvar_cond_regime_path_shock!, simulate_ms_var_1_cond_shocks!,
+     simulate_nu_cond_x_i_shock_rn!,  compute_mc_real_estate_Q_cond_x_i_nofull!,
+     simulate_Q_acc_ts!, simulate_model_prices_cond_shock_acc_ts!
 
 
 
