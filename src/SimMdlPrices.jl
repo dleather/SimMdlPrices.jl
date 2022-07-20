@@ -1026,10 +1026,10 @@ function compute_mc_real_estate_Q_cond_x_i_nofull(x_mat, ν_mat)
 end
 
 function compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc, η_mc, Q_std_mc, Q_std_prep, x_mat,
-          ν_mat, η_sim, m1_η_sim, η_std_prep)
+          ν_mat, η_sim, m1_η_sim, η_std_prep,TT)
      
      T = size(x_mat)[2] - 1
-     n_η = T
+     n_η = T + TT - 1
      G = size(x_mat)[3]
      N_re = size(ν_mat)[1]
 
@@ -1037,29 +1037,29 @@ function compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc, η_mc, Q_std_mc, Q_std_
      @inbounds for g=1:G
           @inbounds for t=1:T
                @inbounds for j=1:N_re
-                    if t==1
+                    if (t+TT-1)==1
                          m1_η_sim[j, t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] 
                     else
-                         m1_η_sim[j, t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] +
-                                              m1_η_sim[j, t-1, g]
+                         m1_η_sim[j, TT-1+t, g] =  ν_mat[j,t,g] - x_mat[3,t,g] +
+                                              m1_η_sim[j, TT-2+t, g]
                     end
-                    η_sim[j,t,g] = exp(m1_η_sim[j,t,g])
+                    η_sim[j,TT-1+t,g] = exp(m1_η_sim[j,TT-1+t,g])
                end
           end
      end
 
-     η_mc .= dropdims(mean(η_sim, dims = 3), dims = 3)
+     η_mc .= dropdims(mean(η_sim, dims = 3), dims =  3)
      Q_mc .= sum(@view(η_mc[:,1:n_η]), dims = 2)
      
      #Get std mat
-     N_std = Int64(floor(G / 30))
+     N_std = fld(G,30)
 
      @inbounds for i=1:30
           η_std_prep[:, :, i] =  dropdims(mean(@view(η_sim[:, :, 1+(i-1)*N_std:i*N_std]), dims = 3), dims = 3)
           Q_std_prep[:, i] = sum(@view(η_std_prep[:, 1:n_η, i]), dims = 2)
      end
 
-     Q_std_mc .= std(Q_std_prep, dims = 2) / sqrt(30)
+     Q_std_mc .= std(Q_std_prep, dims = 2) / sqrt(30.0)
 
      return 
      
@@ -1107,6 +1107,16 @@ function   get_total_mean_and_std(Q_mc_cell, eta_mc_cell, Q_std_prep_cell)
      return Q_mc_tot, eta_mc_tot, Q_std_mc_tot 
 end
 
+function  get_total_mean_and_std!(Q_mc_tot,eta_mc_tot,Q_std_mc_tot,Q_mc_cell, eta_mc_cell, 
+     Q_std_prep_cell)
+
+     compute_mean_over_subsamples!(Q_mc_tot,Q_mc_cell)
+     compute_mean_over_subsamples!(eta_mc_tot ,eta_mc_cell)
+
+     compute_std_over_subsamples!(Q_std_mc_tot,Q_std_prep_cell)
+
+end
+
 function compute_std_over_subsamples(in_cell_std)
      L = size(in_cell_std)[1]
      N1, N2 = size(in_cell_std[1])
@@ -1125,6 +1135,22 @@ function compute_std_over_subsamples(in_cell_std)
 
 end
 
+function compute_std_over_subsamples!(out_std_mat,in_cell_std)
+     L = size(in_cell_std)[1]
+     N1, N2 = size(in_cell_std[1])
+
+     
+     if L>1
+          in_std_mat = dropdims(sum(reshape(reduce(hcat, in_cell_std), N1, N2, L), dims = 3) ./ L, dims = 3)
+      else
+          in_std_mat = in_cell_std[1]
+      end
+      
+     b = size(in_std_mat)[2]
+     out_std_mat .= std(in_std_mat, dims = 2) ./ sqrt(b)
+
+end
+
 function compute_mean_over_subsamples(in_cell)
 
      n,m = size(in_cell[1])
@@ -1137,6 +1163,19 @@ function compute_mean_over_subsamples(in_cell)
      end
 
      return mean_mat
+
+end
+
+function compute_mean_over_subsamples!(mean_mat,in_cell)
+
+     n,m = size(in_cell[1])
+     L = size(in_cell)[1]
+
+     if m==1
+         mean_mat = mean(reduce(hcat,in_cell), dims = 2)
+     else
+         mean_mat =  dropdims(sum(reshape(reduce(hcat, in_cell), n, m, L), dims = 3) ./ L, dims = 3)
+     end
 
 end
 
@@ -1322,17 +1361,10 @@ end
 
 function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, u, ϵ, w, z, 
      tol, del, η_tol, t, s, n_grps, L,x_mat, ν_mat, s_mat, Q_mc, η_mc, Q_std_mc, Q_std_prep,
-     Q_mc_cell, η_mc_cell, Q_std_mc_cell, Q_std_prep_cell, η_sim, m1_η_sim,η_std_prep)
+     Q_mc_cell, η_mc_cell, Q_std_mc_cell, Q_std_prep_cell, η_sim, m1_η_sim,η_std_prep,Q_mc_tot,η_mc_tot,Q_std_mc_tot)
 
-
-     #tmr = TimerOutput()
-     # Unload inputs
-     N_macro = 3
-     N_re = 3
-     M = size(u)[1]
      G = size(ϵ)[3]
-     #@assert floor(G / L)== (G/L)
-     gg = Int64(G / L)
+     gg = fld(G,L)
 
      @unpack μ_Q, Φ_Q, Σ, Π = mrfp
 
@@ -1363,7 +1395,7 @@ function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, 
                #Detect early truncation point, T_bar
                trig_2 = 0
                cnt_2 = 1
-               T_tmp = Int64(T_sim ./ n_grps)
+               T_tmp = fld(T_sim,n_grps)
                x_mat[:, 1, 1+(l-1)*gg:l*gg] = repeat(X, 1, 1, gg)
                ν_mat[:, 1, 1+(l-1)*gg:l*gg] = repeat(ν, 1, 1, gg)
                s_mat[1, 1+(l-1)*gg:l*gg] .= s
@@ -1384,19 +1416,24 @@ function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, 
                     ν_mat_in = @view(ν_mat[:, tmp_ndx[1]:tmp_ndx[end]+1, 1+(l-1)*gg:l*gg])
                     s_mat_in = @view(s_mat[tmp_ndx[1]:tmp_ndx[end]+1, 1+(l-1)*gg:l*gg])
                     Q_mc_in = @view(Q_mc_cell[l][:,1])
-                    η_mc_in = @view(η_mc_cell[l][:,:])
+                    η_mc_in = @view(η_mc_cell[l][:,1:tmp_ndx[end]])
                     Q_std_mc_in = @view(Q_std_mc_cell[l][:,1])
                     Q_std_prep_in = @view(Q_std_prep_cell[l][:,:])
+                    η_sim_in = @view(η_sim[:,1:tmp_ndx[end], 1+(l-1)*gg:l*gg])
+                    m1_η_sim_in = @view(m1_η_sim[:,1:tmp_ndx[end], 1+(l-1)*gg:l*gg])
+                    η_std_prep_in = @view(η_std_prep[:,1:tmp_ndx[end], :])
+
 
 
                     simulate_Q_acc_ts!(ν_mat_in,x_mat_in,s_mat_in,x0,s0,ν0,u_in,ϵ_in,
                                        mrfp,w_mat_in,z_mat_in,Q_mc_in,η_mc_in,Q_std_mc_in,
-                                       Q_std_prep_in,η_sim,m1_η_sim,η_std_prep)
+                                       Q_std_prep_in,η_sim_in,m1_η_sim_in,η_std_prep_in,
+                                       tmp_ndx[1])
 
 
                     
                     #Check that all η_{T_sim,x_t)< cutoff for all t
-                    if (~any(η_mc_in[:, end] .>= η_tol)) || (cnt_2==n_grps)
+                    if (~any(@view(η_mc_in[:, end]) .>= η_tol)) || (cnt_2==n_grps)
 
                          #Set loop trigger and T_bar
                          T_bar = cnt_2*T_tmp
@@ -1426,21 +1463,27 @@ function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, 
                ν_mat_in = @view(ν_mat[:, 1:T_bar+1, 1+(l-1)*gg:l*gg])
                s_mat_in = @view(s_mat[1:T_bar+1, 1+(l-1)*gg:l*gg])
                Q_mc_in = @view(Q_mc_cell[l][:,1])
-               η_mc_in = @view(η_mc_cell[l][:,:])
+               η_mc_in = @view(η_mc_cell[l][:,1:T_bar])
                Q_std_mc_in = @view(Q_std_mc_cell[l][:,1])
                Q_std_prep_in = @view(Q_std_prep_cell[l][:,:])
+               η_sim_in = @view(η_sim[:,1:T_bar, 1+(l-1)*gg:l*gg])
+               m1_η_sim_in = @view(m1_η_sim[:,1:T_bar, 1+(l-1)*gg:l*gg])
+               η_std_prep_in = @view(η_std_prep[:,1:T_bar, :])
 
                #Given simulation-approximate term-structure
                simulate_Q_acc_ts!(ν_mat_in,x_mat_in,s_mat_in,x0,s0,ν0,u_in,ϵ_in,
                                    mrfp,w_mat_in,z_mat_in,Q_mc_in,η_mc_in,Q_std_mc_in,
-                                   Q_std_prep_in,η_sim,m1_η_sim,η_std_prep)
+                                   Q_std_prep_in,η_sim_in,m1_η_sim_in,η_std_prep_in,1)
           end
 
 
           #Compute total mean and variance
 
-          Q_mc_tot, η_mc_tot, Q_std_mc_tot =
-               get_total_mean_and_std(@view(Q_mc_cell[1:l]),@view(η_mc_cell[1:l]),@view(Q_std_prep_cell[1:l]))
+          #Q_mc_tot, η_mc_tot, Q_std_mc_tot = get_total_mean_and_std(@view(Q_mc_cell[1:l][:,1]),@view(η_mc_cell[1:l][:,:]),@view(Q_std_prep_cell[1:l][:,:]))
+          get_total_mean_and_std!(Q_mc_tot,η_mc_tot,Q_std_mc_tot,
+                                  @view(Q_mc_cell[1:l][:,1]),@view(η_mc_cell[1:l][:,:]),
+                                  @view(Q_std_prep_cell[1:l][:,:]))
+
 
           #Check condition
           if (!any((2 .* (1. .- normcdf.((1.2 .* tol .* Q_mc_tot) ./ Q_std_mc_tot)) .> del)) || (l==L) )
@@ -1465,15 +1508,13 @@ function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, 
 end
 
 function simulate_Q_acc_ts!(ν_mat,x_mat,s_mat,x0,s0,ν0,u,ϵ,mrfp,w,z,Q_mc,η_mc,Q_std_mc,Q_std_prep,
-                            η_sim,m1_η_sim,η_std_prep)
+                            η_sim,m1_η_sim,η_std_prep,TT)
 
      @unpack μ_Q,Φ_Q,Σ,Π = mrfp     
      simulate_ms_var_1_cond_shocks!(x_mat,s_mat,x0,s0,μ_Q, Φ_Q, Σ, Π, u,ϵ)
      simulate_nu_cond_x_i_shock_rn!(ν_mat,x_mat, ν0, mrfp,w, z)
      compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc,η_mc,Q_std_mc,Q_std_prep,x_mat,ν_mat,
-                                               η_sim, m1_η_sim, η_std_prep)
-
-
+                                               η_sim, m1_η_sim, η_std_prep,TT)
 
 end
 
@@ -3035,8 +3076,7 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      get_projection_matrix_antithetic,simulate_markov_switch_init_cond_shock!,
      simulate_msvar_cond_regime_path_shock!, simulate_ms_var_1_cond_shocks!,
      simulate_nu_cond_x_i_shock_rn!,  compute_mc_real_estate_Q_cond_x_i_nofull!,
-     simulate_Q_acc_ts!, simulate_model_prices_cond_shock_acc_ts!
-
-
+     simulate_Q_acc_ts!, simulate_model_prices_cond_shock_acc_ts!, compute_mean_over_subsamples!,
+     compute_std_over_subsamples!
 
 end
