@@ -1049,7 +1049,7 @@ function compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc, η_mc, Q_std_mc, Q_std_
      end
 
      η_mc .= dropdims(mean(η_sim, dims = 3), dims =  3)
-     Q_mc .= sum(@view(η_mc[:,1:n_η]), dims = 2)
+     Q_mc .= dropdims(sum(@view(η_mc[:,1:n_η]), dims = 2),dims=2)
      
      #Get std mat
      N_std = fld(G,30)
@@ -1059,7 +1059,7 @@ function compute_mc_real_estate_Q_cond_x_i_nofull!(Q_mc, η_mc, Q_std_mc, Q_std_
           Q_std_prep[:, i] = sum(@view(η_std_prep[:, 1:n_η, i]), dims = 2)
      end
 
-     Q_std_mc .= std(Q_std_prep, dims = 2) / sqrt(30.0)
+     Q_std_mc .= dropdims(std(Q_std_prep, dims = 2) / sqrt(30.0),dims=2)
 
      return 
      
@@ -1147,7 +1147,7 @@ function compute_std_over_subsamples!(out_std_mat,in_cell_std)
       end
       
      b = size(in_std_mat)[2]
-     out_std_mat .= std(in_std_mat, dims = 2) ./ sqrt(b)
+     out_std_mat .= dropdims(std(in_std_mat, dims = 2) ./ sqrt(b),dims=2)
 
 end
 
@@ -1172,9 +1172,9 @@ function compute_mean_over_subsamples!(mean_mat,in_cell)
      L = size(in_cell)[1]
 
      if m==1
-         mean_mat = mean(reduce(hcat,in_cell), dims = 2)
+         mean_mat .= dropdims(mean(reduce(hcat,in_cell), dims = 2),dims=2)
      else
-         mean_mat =  dropdims(sum(reshape(reduce(hcat, in_cell), n, m, L), dims = 3) ./ L, dims = 3)
+         mean_mat .=  dropdims(sum(reshape(reduce(hcat, in_cell), n, m, L), dims = 3) ./ L, dims = 3)
      end
 
 end
@@ -1361,7 +1361,8 @@ end
 
 function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, u, ϵ, w, z, 
      tol, del, η_tol, t, s, n_grps, L,x_mat, ν_mat, s_mat, Q_mc, η_mc, Q_std_mc, Q_std_prep,
-     Q_mc_cell, η_mc_cell, Q_std_mc_cell, Q_std_prep_cell, η_sim, m1_η_sim,η_std_prep,Q_mc_tot,η_mc_tot,Q_std_mc_tot)
+     Q_mc_cell, η_mc_cell, Q_std_mc_cell, Q_std_prep_cell, η_sim, m1_η_sim,η_std_prep,
+     Q_mc_tot,η_mc_tot,Q_std_mc_tot,T_bar_mat,G_bar_mat)
 
      G = size(ϵ)[3]
      gg = fld(G,L)
@@ -1496,6 +1497,9 @@ function simulate_model_prices_cond_shock_acc_ts!(x_init, ν_init, mrfp, T_sim, 
                Q_mc[:, 1] = Q_mc_tot
                η_mc[:, 1:T_bar] = η_mc_tot[:,1:T_bar]
                Q_std_mc[:, 1] = Q_std_mc_tot
+               T_bar_mat[t,s] = T_bar
+               G_bar_mat[t,s] = Int(l*gg)
+
 
           else
 
@@ -2083,7 +2087,7 @@ end
 
 function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      
-     sf = 100. #scale factor
+     sf = 100.0 #scale factor
 
      #Unload structures
      @unpack Y0_macro, Y0_ν, Y0_ts, Y0_q, T, n_macro, n_yields, n_re = data_struct
@@ -2120,7 +2124,8 @@ function compute_model_neg_log_lik(pred_struct, data_struct, rf_struct)
      for s ∈ 1:S
           cov_m = Σ_m * kron(eye_s[:,s], eye_macro)
           if !isposdef(cov_m)
-               cov_m = LowerTriangular(cov_m) + LowerTriangular(cov_m)'
+               cov_m = LowerTriangular(cov_m) + LowerTriangular(cov_m)' - 
+                       Matrix(I,n_macro,n_macro) .* repeat(diag(cov_m),1,3)
           end
           macro_ll_cons[s] = logSrpMacrofac - sum(log.(diag(cholesky(cov_m).U)))
      end
@@ -3077,6 +3082,7 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      simulate_msvar_cond_regime_path_shock!, simulate_ms_var_1_cond_shocks!,
      simulate_nu_cond_x_i_shock_rn!,  compute_mc_real_estate_Q_cond_x_i_nofull!,
      simulate_Q_acc_ts!, simulate_model_prices_cond_shock_acc_ts!, compute_mean_over_subsamples!,
-     compute_std_over_subsamples!
+     compute_std_over_subsamples!, construct_cov_re, pQQmc_1d
 
 end
+
