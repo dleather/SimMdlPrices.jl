@@ -309,15 +309,18 @@ end
 function get_forward_solution_msre(π_m, A1₁, A1₂, F1₁, F1₂, m1₁, m1₂, Σ1_11, Σ1_12, Σ1_21, 
                Σ1_22, maxₖ)
 
-     Φ, k_term = get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂, maxₖ = maxₖ)
+     Φ, k_term, Ξ = get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂, maxₖ = maxₖ)
 
      μ, Σ =  compute_μ_Σ_fmmsre(Φ, A1₁, A1₂, m1₁, m1₂, Σ1_11, Σ1_12, Σ1_21, Σ1_22, π_m)
 
-     if k_term == maxₖ
-          det_dum = 0
-     else
-          det_dum = 1
-     end
+     #if k_term == maxₖ
+     #     det_dum = 0
+     #else
+     #     det_dum = 1
+     #end
+
+     det_dum, FCC, DET = check_determinancy_fmsre(Φ, Ξ, A1₁, A1₂, Σ1_11, Σ1_12, Σ1_21, 
+                                                  Σ1_22, k_term, π_m)
 
      Φ_out = [Φ[1], Φ[1], Φ[2], Φ[2]]
      μ_out = [μ[1], μ[1], μ[2], μ[2]]
@@ -370,7 +373,7 @@ function get_rf_Φ(π_m, F1₁, F1₂, A1₁, A1₂; maxₖ = 1000, tolK = 0.000
 
 end
 
-function check_determinancy_fmsre(Φ, Ξ, A1₁, A1₂, Σ1_11, Σ1_12, Σ1_21, Σ1_22; maxK = 1000)
+function check_determinancy_fmsre(Φ, Ξ, A1₁, A1₂, Σ1_11, Σ1_12, Σ1_21, Σ1_22, termK, P; maxK = 1000)
      # This code follows the MATLAB code provided by SeongHoon Cho's website for the paper
      # "Sufficient Conditions and Determinancy in a Class of Markov-Switching Rational
      # Expectations Models" (Cho & Moreno, Review of Economic Dynamics 2016).
@@ -400,7 +403,7 @@ function check_determinancy_fmsre(Φ, Ξ, A1₁, A1₂, Σ1_11, Σ1_12, Σ1_21, 
      FK = Array{Array{Float64}}(undef, S, S) # n x n
      for i=1:S
           for j=1:S
-               FK[i,j] = Ξ[s] \ A[i,j] 
+               FK[i,j] = Ξ[i] \ A[i,j] 
           end
      end
 
@@ -611,10 +614,10 @@ function construct_structural_parameters(params)
 
      PiX = @SMatrix [ params[4] 0. 0.; params[7] params[5] 0.; params[8] 0. params[6] ]
      Pi0 = SMatrix{3,1}([params[1] params[2] params[3]])
-     beta1 = (1. -params[16]) \ params[18]
-     beta2 = (1. -params[17]) \ params[19]
-     alpha1 = (1. -params[16])\params[20]
-     alpha2 = (1.  -params[17])\params[21]
+     beta1 = (1. - params[16]) \ params[18]
+     beta2 = (1. - params[17]) \ params[19]
+     alpha1 = (1. - params[16]) \ params[20]
+     alpha2 = (1.  - params[17]) \ params[21]
      pi_m = @SMatrix [ params[52] 1-params[52]; 1-params[53] params[53] ]
      pi_d = @SMatrix [ params[54] 1-params[54]; 1-params[55] params[55] ]
      
@@ -3189,6 +3192,37 @@ function is_feasible_pixg_cap(θ)
      return out_dum # ,rf_struct,dlta_A,dlta_I,dlta_O,m1_nu_cell,m2_nu_cell
 end
 
+function enforce_regime_restrictions(θ)
+
+
+     θ_new = copy(θ)
+
+     #for s_m \alpha_1 >= \alpha_2
+     alpha1 = (1. - θ[16]) \ θ[20]
+     alpha2 = (1.  - θ[17]) \ θ[21]
+     if alpha1 < alpha2
+          θ_new[16] = θ[17]
+          θ_new[17] = θ[16]
+          θ_new[20] = θ[21]
+          θ_new[21] = θ[20]
+          θ_new[18] = θ[19]
+          θ_new[19] = θ[18]
+          θ_new[52] = θ[53]
+          θ_new[53] = θ[52]
+     end
+
+     #for s_d, \sigma_r_1 > \sigma_r_2
+     σ_r₁ = θ[24]
+     σ_r₂ = θ[25]
+     if σ_r₁ < σ_r₂
+          θ_new[24] = θ[25]
+          θ_new[25] = θ[24]
+     end
+
+     return θ_new
+
+end
+
 export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks, 
      simulate_msvar_cond_regime_path_shock, construct_gamma_macro_array, construct_m0_macro_array, 
      construct_b1_macro_array, construct_bm1_macro_array, construct_b0_macro_array, 
@@ -3206,7 +3240,7 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      simulate_nu_cond_x_i_shock_rn!,  compute_mc_real_estate_Q_cond_x_i_nofull!,
      simulate_Q_acc_ts!, simulate_model_prices_cond_shock_acc_ts!, compute_mean_over_subsamples!,
      compute_std_over_subsamples!, construct_cov_re, pQQmc_1d, cond_moms_ms_var,
-     get_ergodic_markov_dist, get_lim_η, is_feasible_pixg_cap
+     get_ergodic_markov_dist, get_lim_η, is_feasible_pixg_cap, enforce_regime_restrictions
 
 end
 
