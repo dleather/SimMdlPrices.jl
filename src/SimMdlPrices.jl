@@ -2785,13 +2785,13 @@ function  cond_moms_ms_var(α,Φ,λ,Π)
      #Get backwards transition probs
      M = Array{Float64}(undef, K, K)
 
-     q = get_ergodic_markov_dist(Π)
+     q = get_ergodic_markov_dist(Π)::StaticArraysCore.SVector{K, Float64}
      for i in 1:K
           for j in 1:K
                M[j,i] = Π[i,j] * (q[i]/q[j])
           end
      end
-     M = M ./ sum(M,dims=2)
+     M .= M ./ sum(M,dims=2)
      
      #Precomputation
      kronMI = kron(M,Matrix{Float64}(I,n,n))
@@ -2814,61 +2814,59 @@ function  cond_moms_ms_var(α,Φ,λ,Π)
      end
     
      # Get J's
-     J_cell = Array{Array{Float64}}(undef,K) #cell(K,1)
+     J_cell = [zeros(n,n*K) for _ in 1:K]
      for i in 1:K
-          J_cell[i] = zeros(n,n*K)
-          J_cell[i][:,1+(i-1)*n:i*n] = I
+          J_cell[i][:,1+(i-1)*n:i*n] = Matrix(I,n,n)
      end
     
      #Get J
-     J = spzeros(n,n*K)
+     J = zeros(n,n*K)
      for i in 1:K
-          J += J_cell[i] 
+          J[:,1+(i-1)*n:i*n] = Matrix(I,n,n)
      end
     
      #Get es
-     e_cell = Array{Array{Float64}}(undef,K) #cell(K,1)
+     e_cell = [zeros(K,1) for _ in 1:K]
      for i in 1:K
-          e_cell[i] = zeros(K,1)
           e_cell[i][i] = 1.0
      end
     
      #Get A0
-     tmp_diags = kronMI*(diagAlpha*diagAlpha' + diagLambda*diagLambda')*J'
-     A0 = zeros(n*K)
+     tmp_diags_1 = kronMI*(diagAlpha*diagAlpha' + diagLambda*diagLambda')*J'
+     A0 = zeros(n*K,n*K)
      for i in 1:K
-          A0[1+(i-1)*n:i*n,1+(i-1)*n:i*n] = tmp_diags[1+(i-1)*n:i*n,:]
+          A0[1+(i-1)*n:i*n,1+(i-1)*n:i*n] = @view(tmp_diags_1[1+(i-1)*n:i*n,:])
      end
     
      #Get H
-     H = spzeros(n*n*K*K,n*n*K)
+     H = zeros(n*n*K*K,n*n*K)
      for i in 1:K
-          H += kron(J_cell[i]',(J_cell[i]'*J_cell[i]))
+          H .= H .+ kron(J_cell[i]',(J_cell[i]'*J_cell[i]))
      end
     
      #Get A
      A0Jp = A0*J'
-     vecA = H* ( (I - (kron(J*diagPhi,kronMI*diagPhi)*H))\A0Jp[:] )
+     vecA = H* ( (I - (kron(J*diagPhi,kronMI*diagPhi)*H))\@view(A0Jp[:]) )
           
      A = reshape(vecA,n*K,n*K)
     
      #Get B01
      B01 = zeros(n*K,K)
-     tmp_diags = kronMI*diagAlpha*ones(K,1)
+     tmp_diags_2 = kronMI*diagAlpha*ones(K,1)
      for ii=1:K
-          B01[1+(ii-1)*n:ii*n,ii] = tmp_diags[1+(ii-1)*n:ii*n]
+          B01[1+(ii-1)*n:ii*n,ii] = @view(tmp_diags_2[1+(ii-1)*n:ii*n])
      end
     
      #Get B0
      B0 = zeros(n*K,K)
-     tmp_diags = (I-kronMI*diagPhi)\B01*ones(K,1)
+     tmp_diags_3 = (I-kronMI*diagPhi)\B01*ones(K,1)
      for i in 1:K
-          B0[1+(i-1)*n:i*n,i] = tmp_diags[1+(i-1)*n:i*n]
+          B0[1+(i-1)*n:i*n,i] = @view(tmp_diags_3[1+(i-1)*n:i*n])
      end
     
      #Get B
      tmp = kronMI * diagPhi * B0 * diagAlpha' * J'
-     vecB = (H / (I-(kron(J*diagPhi,kronMI*diagPhi)*H)) )*tmp[:]
+     vecB = (H / (I-(kron(J*diagPhi,kronMI*diagPhi)*H)) )*@view(tmp[:])
      B = reshape(vecB,n*K,n*K)
     
     
@@ -2890,7 +2888,7 @@ function  cond_moms_ms_var(α,Φ,λ,Π)
      #Second Moment
      m2_cell = Array{Array{Float64}}(undef, K)
      for i in 1:K
-          m2_cell[i] = α[i]*α[i]' + λ[i]*λ[i]' + Φ[i]*J_cell[i]*A*J_cell[i]'*Φ[ii]' +
+          m2_cell[i] = α[i]*α[i]' + λ[i]*λ[i]' + Φ[i]*J_cell[i]*A*J_cell[i]'*Φ[i]' +
                Gamma_cell[i] + Gamma_cell[i]'
      end
 
@@ -2900,11 +2898,11 @@ end
 
 function get_ergodic_markov_dist(Π)
 
-     ey = eigen(Π)
-     evals = ey.values
-     levec = inv(ey.vectors)
+     evals,evec = eigen(Π)
+     #evals = ey.values
+     levec = inv(evec)
      ndx = 0
-     for i in 1:length(evals)
+     for i in eachindex(evals)
          if evals[i]  ≈  1.0
              ndx = i
          end
@@ -2917,14 +2915,15 @@ end
 function get_lim_η(Φ_Q,μ_Q,δ,c,uM1,uVar,cM1_cell,cM2_cell,Π)
 
      ## Precompute stuff
-     q = get_ergodic_markov_dist(Π)
+     S = size(Π,1)
+     q = get_ergodic_markov_dist(Π)::StaticArraysCore.SVector{S, Float64}
+
      PiU = repeat(q',S,1) 
-     S = size(Pi,1)
-     n = size(mu_Q[1],1)
+     n = size(μ_Q[1])[1]
      mm = n*S
 
      g = (x) -> (x-1)%(n)+1
-     f = (x) -> floor((x-1)/n)+1
+     f = (x) -> fld(x-1,n)+1
 
      #Construct M
      M = Array{Float64}(undef, S, mm) #NaN(S,mm)
@@ -2963,21 +2962,21 @@ function get_lim_η(Φ_Q,μ_Q,δ,c,uM1,uVar,cM1_cell,cM2_cell,Π)
      end
 
      ## Compute limit of first moment
-     lim_m1 = δ'*uM1 + c
+     lim_m1 = δ'*uM1 .+ c
 
      ## Compute limit of variance
      lim_var = δ'*uVar*δ
 
      ## Compute limit of sum of covariance terms
      lim_A = Δ' * 
-          kron( (((I-Pi-PiU)\M)/(I-K) - (PiU*M/(I-K))/(I-K))',ones(size(uM1,1),1)') *
+          kron( (((I-Π-PiU)\M)/(I-K) - (PiU*M/(I-K))/(I-K))',ones(size(uM1)[1],1)') *
           Diagonal(X) * Δ 
 
      lim_cov = lim_A + Δ' * Ω * ((I-K) \ Δ) - (Δ' * X) * (X' * ((I-K) \ Δ))
 
 
      ## Put it all together
-     out = lim_m1 + lim_cov - 0.5*lim_var
+     out = lim_m1[1] + lim_cov[1] - 0.5*lim_var[1]
 
      return out, lim_m1, lim_var, lim_cov
 end
@@ -3065,7 +3064,131 @@ function  draw_model_shocks(N_sim,T_sim,N_macro,N_re,seed_number)
      return u_mat,ϵ_mat,w_mat,z_mat
 
 end
+
+function is_feasible_pixg_cap(θ)
+
+     out_dum = 1
+
+     unit_box_params = θ[[14,15,16,17,36,37,38,52,53,54,55]]
+     if any(unit_box_params .<= 0.0)||any(unit_box_params .>= 1.0)
+          out_dum = 0
+     end
+
+     # non-singular structural matricies
+     phi = θ[12]
+     rhob_1 = θ[18]
+     rhob_2 = θ[19]
+     det_A0_1_sq = (1.0 + phi*rhob_1)^2
+     det_A0_2_sq = (1.0 + phi*rhob_2)^2
+     if (det_A0_1_sq<=eps())||(det_A0_2_sq<=eps())
+          out_dum = 0
+     end
+
+     #Regime switching identificaion
+     sig_r_1 = θ[24]
+     sig_r_2 = θ[25]
+     if sig_r_1 < sig_r_2
+          out_dum = 0
+     end
+
+     alpha_hat_1 = θ[20]
+     alpha_hat_2 = θ[21]
+     if alpha_hat_1 < alpha_hat_2
+          out_dum = 0
+     end
+
+     #If you've made it this far we can spend computation time on solving model
+     if out_dum==1
+          rf_struct = params_to_rf(θ)
+
+          #Determinacy of forward solution
+          det_dum = rf_struct.det_dum
+          if det_dum == 0
+               out_dum = 0
+          end
+
+          #All eigenvalues of PhiQ inside of unit circle
+
+          Φ_Q  = rf_struct.Φ_Q
+          S = rf_struct.S
+          for s=1:S
+               eigs_ar = eigen(Φ_Q[s]).values
+               sr = maximum(abs.(eigs_ar))
+               if (sr>=1)
+                    out_dum = 0
+               end
+          end
+
+          #Cap rate pricing is convergent.
+          #NOTE: ONLY DO BELOW IF OUT_DUM IS STILL 1; BECAUSE IT CAN BE
+          #COMPUTATIONALLY INTENSIVE.
+          if out_dum==1
+               mu_nu_rn_cell = rf_struct.μ_Q_ν
+               phi_nu_rn_cell = rf_struct.Φ_Q_ν
+               sig_nu_cell = rf_struct.Σ_ν
+               Pi = rf_struct.Π
+               q = rf_struct.q
+
+               #Compute conditional moments of augmented nu msvar
+               m1_nu_cell,m2_nu_cell = cond_moms_ms_var(mu_nu_rn_cell,phi_nu_rn_cell,sig_nu_cell,Pi)
+               #[uE,uM2,uV,hat_m1_nu_cell,hat_m2_nu_cell] = ...
+               #    moms_ms_var_fior_code(mu_nu_rn_cell,phi_nu_rn_cell,...
+               #    sig_nu_cell,Pi)
+               
+               m2 = zeros(6,6)
+               m1 = zeros(6,1)
+               for s=1:S
+                    m2 .= m2 .+ q[s].*m2_nu_cell[s] 
+                    m1 .= m1 .+ q[s].*m1_nu_cell[s]
+               end
+               dlta_A = [0. 0. -1. 1. 0. 0.]'
+               dlta_I = [0. 0. -1. 0. 1. 0.]'
+               dlta_O = [0. 0. -1. 0. 0. 1.]'
+               
+               lim_eta_A,lim_m1_eta_A,lim_cov_eta_A,lim_var_eta_A = 
+                    get_lim_η(phi_nu_rn_cell,mu_nu_rn_cell,dlta_A,0.0,m1,m2-(m1*m1'),m1_nu_cell,
+                              m2_nu_cell,Pi)
+
+               lim_eta_I,lim_m1_eta_I,lim_cov_eta_I,lim_var_eta_I = 
+                    get_lim_η(phi_nu_rn_cell,mu_nu_rn_cell,dlta_I,0.0,m1,m2-m1*m1',
+                              m1_nu_cell,m2_nu_cell,Pi)
+
+               lim_eta_O,lim_m1_eta_O,lim_cov_eta_O,lim_var_eta_O = 
+                    get_lim_η(phi_nu_rn_cell,mu_nu_rn_cell,dlta_O,0.0,m1,m2-m1*m1',
+                              m1_nu_cell,m2_nu_cell,Pi)
+
+               if any([lim_eta_A lim_eta_I lim_eta_O]' .>= 0)
+                    out_dum = 0
+               end
+     end
+
+     #Compute unconditional risk premia
+     pi_0 = θ[1:3]
+     pi_x = diagm(θ[4:6])
+     pi_x[2,1] = θ[7]
+     pi_x[3,1] = θ[8]
+     u_rp = zeros(3,1)
+     cov_cell = rf_struct.cov
+     mu_cell = rf_struct.μ
+     phi_cell = rf_struct.Φ
+     sig_cell = rf_struct.Σ
+
+     m1_cell,~ = cond_moms_ms_var(mu_cell,phi_cell,sig_cell,Pi)
      
+     for s=1:S
+          u_rp += q[s].*(cov_cell[s]*(pi_0 + pi_x*m1_cell[s]))
+     end
+     
+     if u_rp[1]<0
+          out_dum = 0
+     end
+
+     end
+
+
+     return out_dum # ,rf_struct,dlta_A,dlta_I,dlta_O,m1_nu_cell,m2_nu_cell
+end
+
 export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks, 
      simulate_msvar_cond_regime_path_shock, construct_gamma_macro_array, construct_m0_macro_array, 
      construct_b1_macro_array, construct_bm1_macro_array, construct_b0_macro_array, 
@@ -3082,7 +3205,8 @@ export simulate_markov_switch_init_cond_shock, simulate_ms_var_1_cond_shocks,
      simulate_msvar_cond_regime_path_shock!, simulate_ms_var_1_cond_shocks!,
      simulate_nu_cond_x_i_shock_rn!,  compute_mc_real_estate_Q_cond_x_i_nofull!,
      simulate_Q_acc_ts!, simulate_model_prices_cond_shock_acc_ts!, compute_mean_over_subsamples!,
-     compute_std_over_subsamples!, construct_cov_re, pQQmc_1d
+     compute_std_over_subsamples!, construct_cov_re, pQQmc_1d, cond_moms_ms_var,
+     get_ergodic_markov_dist, get_lim_η, is_feasible_pixg_cap
 
 end
 
