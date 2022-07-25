@@ -3163,30 +3163,31 @@ function is_feasible_pixg_cap(θ)
                if any([lim_eta_A lim_eta_I lim_eta_O]' .>= 0)
                     out_dum = 0
                end
+
+               #Compute unconditional risk premia
+               pi_0 = θ[1:3]
+               pi_x = diagm(θ[4:6])
+               pi_x[2,1] = θ[7]
+               pi_x[3,1] = θ[8]
+               u_rp = zeros(3,1)
+               cov_cell = rf_struct.cov
+               mu_cell = rf_struct.μ
+               phi_cell = rf_struct.Φ
+               sig_cell = rf_struct.Σ
+
+               m1_cell,~ = cond_moms_ms_var(mu_cell,phi_cell,sig_cell,Pi)
+               
+               for s=1:S
+                    u_rp += q[s].*(cov_cell[s]*(pi_0 + pi_x*m1_cell[s]))
+               end
+               
+               if u_rp[1]<0
+                    out_dum = 0
+               end
+          end
      end
 
-     #Compute unconditional risk premia
-     pi_0 = θ[1:3]
-     pi_x = diagm(θ[4:6])
-     pi_x[2,1] = θ[7]
-     pi_x[3,1] = θ[8]
-     u_rp = zeros(3,1)
-     cov_cell = rf_struct.cov
-     mu_cell = rf_struct.μ
-     phi_cell = rf_struct.Φ
-     sig_cell = rf_struct.Σ
-
-     m1_cell,~ = cond_moms_ms_var(mu_cell,phi_cell,sig_cell,Pi)
      
-     for s=1:S
-          u_rp += q[s].*(cov_cell[s]*(pi_0 + pi_x*m1_cell[s]))
-     end
-     
-     if u_rp[1]<0
-          out_dum = 0
-     end
-
-     end
 
 
      return out_dum # ,rf_struct,dlta_A,dlta_I,dlta_O,m1_nu_cell,m2_nu_cell
